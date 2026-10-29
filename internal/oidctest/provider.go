@@ -40,6 +40,24 @@ type Settings struct {
 	Nonce        *string       // override nonce (default: nonce from the authorize request)
 	TTL          time.Duration // ID token lifetime (default 5m); negative = already expired
 	BadSignature bool          // sign with a key not in the JWKS
+
+	// Raw overrides: when set, the endpoint returns this instead of its normal
+	// response (used to test that upstream error bodies never reach logs).
+	Discovery *Response
+	JWKS      *Response
+	Token     *Response
+}
+
+// Response is a canned HTTP response.
+type Response struct {
+	Status int
+	Body   string
+}
+
+func (r *Response) write(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(r.Status)
+	w.Write([]byte(r.Body))
 }
 
 type authReq struct {
@@ -141,6 +159,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
+	if o := p.get().Discovery; o != nil {
+		o.write(w)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"issuer":                                p.Issuer,
 		"authorization_endpoint":                p.Issuer + "/authorize",
@@ -155,6 +177,10 @@ func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Provider) jwks(w http.ResponseWriter, r *http.Request) {
+	if o := p.get().JWKS; o != nil {
+		o.write(w)
+		return
+	}
 	pub := p.key.PublicKey
 	writeJSON(w, 200, map[string]any{"keys": []map[string]string{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": p.kid,
@@ -198,6 +224,10 @@ func (p *Provider) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if id != p.ClientID || subtle.ConstantTimeCompare([]byte(secret), []byte(p.ClientSecret)) != 1 {
 		writeJSON(w, 401, map[string]string{"error": "invalid_client"})
+		return
+	}
+	if o := p.get().Token; o != nil {
+		o.write(w)
 		return
 	}
 	if r.PostForm.Get("grant_type") != "authorization_code" {

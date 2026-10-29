@@ -869,3 +869,61 @@ type discardWriter struct{ h http.Header }
 func (d *discardWriter) Header() http.Header         { return d.h }
 func (d *discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (d *discardWriter) WriteHeader(int)             {}
+
+func TestCallbackFailureLogsContainNoUpstreamContent(t *testing.T) {
+	secretBody := `{"access_token":"SECRET-ACCESS-MARKER","refresh_token":"SECRET-REFRESH-MARKER","id_token":"SECRET-ID-MARKER"}`
+	cases := map[string]struct {
+		set     func(*oidctest.Settings)
+		tamper  func(cb string) string
+		wantLog string
+	}{
+		"token endpoint 502 with token body": {
+			set:     func(s *oidctest.Settings) { s.Token = &oidctest.Response{Status: 502, Body: secretBody} },
+			wantLog: "token endpoint: unsuccessful response (HTTP 502)",
+		},
+		"token endpoint error description": {
+			set: func(s *oidctest.Settings) {
+				s.Token = &oidctest.Response{Status: 400, Body: `{"error":"invalid_grant","error_description":"DESC-MARKER"}`}
+			},
+			wantLog: "provider error invalid_grant (HTTP 400)",
+		},
+		"jwks failure with body": {
+			set:     func(s *oidctest.Settings) { s.JWKS = &oidctest.Response{Status: 500, Body: secretBody} },
+			wantLog: "id token: jwks fetch failed",
+		},
+		"callback error_description": {
+			tamper: func(cb string) string {
+				return "/auth/callback?error=CODE-MARKER&error_description=SECRET-DESC-MARKER&state=x"
+			},
+			wantLog: `"error":"other"`,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.op.Set(func(s *oidctest.Settings) { *s = oidctest.Settings{User: alice} })
+			b := e.browser("203.0.113.5")
+			cb := b.startLogin()
+			if tc.set != nil {
+				e.op.Set(tc.set)
+			}
+			if tc.tamper != nil {
+				cb = tc.tamper(cb)
+			}
+			resp := b.do("GET", cb, nil)
+			if resp.StatusCode < 400 || b.cookies[sessionCookie] != nil {
+				t.Fatalf("login did not fail: %d", resp.StatusCode)
+			}
+			logs := e.logs.String()
+			if !strings.Contains(logs, `"msg":"login failed"`) || !strings.Contains(logs, tc.wantLog) {
+				t.Errorf("logs missing %q:\n%s", tc.wantLog, logs)
+			}
+			if strings.Contains(logs, "MARKER") {
+				t.Errorf("logs leak upstream content:\n%s", logs)
+			}
+			if page := bodyOf(t, resp); strings.Contains(page, "MARKER") {
+				t.Errorf("page leaks upstream content:\n%s", page)
+			}
+		})
+	}
+}

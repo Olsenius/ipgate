@@ -145,7 +145,8 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := q.Get("error"); e != "" {
-		s.loginFailed(w, http.StatusBadRequest, "provider returned error", "error", truncate(e, 100), "description", truncate(q.Get("error_description"), 200))
+		// error_description is attacker-controllable free text; log only a known code.
+		s.loginFailed(w, http.StatusBadRequest, "provider returned error", "error", auth.SafeOAuthCode(e))
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(ls.State)) != 1 {

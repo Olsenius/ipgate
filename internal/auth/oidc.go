@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -76,11 +75,11 @@ func (o *OIDC) ctx(parent context.Context) context.Context {
 	return oidc.ClientContext(parent, o.client)
 }
 
-// Discover performs one discovery attempt.
+// Discover performs one discovery attempt. Errors are log-safe (*Error).
 func (o *OIDC) Discover() error {
 	p, err := oidc.NewProvider(o.ctx(context.Background()), o.cfg.Issuer)
 	if err != nil {
-		return err
+		return classifyDiscovery(err)
 	}
 	o.ready.Store(&discovered{
 		oauth: oauth2.Config{
@@ -129,6 +128,7 @@ func (o *OIDC) AuthCodeURL(ls LoginState) (string, error) {
 
 // Exchange redeems the code (with the PKCE verifier), verifies the ID token
 // (signature, issuer, audience, expiry) and its nonce, and returns its claims.
+// Errors are ErrNotReady or a log-safe *Error.
 func (o *OIDC) Exchange(ctx context.Context, code string, ls LoginState) (*Claims, error) {
 	d := o.ready.Load()
 	if d == nil {
@@ -137,25 +137,25 @@ func (o *OIDC) Exchange(ctx context.Context, code string, ls LoginState) (*Claim
 	ctx = o.ctx(ctx)
 	tok, err := d.oauth.Exchange(ctx, code, oauth2.VerifierOption(ls.Verifier))
 	if err != nil {
-		return nil, fmt.Errorf("code exchange: %w", err)
+		return nil, classifyToken(err)
 	}
 	raw, ok := tok.Extra("id_token").(string)
 	if !ok || raw == "" {
-		return nil, errors.New("token response has no id_token")
+		return nil, newError("token endpoint", "response has no id_token")
 	}
 	idt, err := d.verifier.Verify(ctx, raw)
 	if err != nil {
-		return nil, fmt.Errorf("id token: %w", err)
+		return nil, classifyVerify(err)
 	}
 	if subtle.ConstantTimeCompare([]byte(idt.Nonce), []byte(ls.Nonce)) != 1 {
-		return nil, errors.New("id token: nonce mismatch")
+		return nil, newError("id token", "nonce mismatch")
 	}
 	var c Claims
 	if err := idt.Claims(&c); err != nil {
-		return nil, fmt.Errorf("id token claims: %w", err)
+		return nil, newError("id token", "invalid claims")
 	}
 	if c.Sub == "" {
-		return nil, errors.New("id token: empty sub")
+		return nil, newError("id token", "empty sub")
 	}
 	return &c, nil
 }

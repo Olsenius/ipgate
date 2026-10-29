@@ -2,11 +2,14 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -175,12 +178,12 @@ func TestOIDCExchangeFailures(t *testing.T) {
 		mutate func(*LoginState)
 		want   string
 	}{
-		"wrong nonce":    {set: func(s *oidctest.Settings) { s.Nonce = &wrong }, want: "nonce"},
-		"wrong audience": {set: func(s *oidctest.Settings) { s.Audience = "someone-else" }, want: "audience"},
-		"wrong issuer":   {set: func(s *oidctest.Settings) { s.Issuer = "https://evil.example" }, want: "different provider"},
-		"expired token":  {set: func(s *oidctest.Settings) { s.TTL = -time.Minute }, want: "expired"},
-		"bad signature":  {set: func(s *oidctest.Settings) { s.BadSignature = true }, want: "signature"},
-		"pkce mismatch":  {mutate: func(ls *LoginState) { ls.Verifier = "x" + ls.Verifier[1:] }, want: "code exchange"},
+		"wrong nonce":    {set: func(s *oidctest.Settings) { s.Nonce = &wrong }, want: "id token: nonce mismatch"},
+		"wrong audience": {set: func(s *oidctest.Settings) { s.Audience = "someone-else" }, want: "id token: wrong audience"},
+		"wrong issuer":   {set: func(s *oidctest.Settings) { s.Issuer = "https://evil.example" }, want: "id token: wrong issuer"},
+		"expired token":  {set: func(s *oidctest.Settings) { s.TTL = -time.Minute }, want: "id token: expired"},
+		"bad signature":  {set: func(s *oidctest.Settings) { s.BadSignature = true }, want: "id token: bad signature"},
+		"pkce mismatch":  {mutate: func(ls *LoginState) { ls.Verifier = "x" + ls.Verifier[1:] }, want: "token endpoint: provider error invalid_grant (HTTP 400)"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -247,4 +250,137 @@ func TestOIDCNotReadyAndDiscoverLoop(t *testing.T) {
 	if !o.Ready() {
 		t.Fatal("not ready after DiscoverLoop")
 	}
+}
+
+// secretBody looks like a token response that arrived with an error status, the
+// scenario from the security review (F1).
+const secretBody = `{"access_token":"SECRET-ACCESS-MARKER","refresh_token":"SECRET-REFRESH-MARKER","id_token":"SECRET-ID-MARKER"}`
+
+func assertNoMarker(t *testing.T, where, s string) {
+	t.Helper()
+	if strings.Contains(s, "MARKER") {
+		t.Errorf("%s leaks upstream content: %s", where, s)
+	}
+}
+
+func TestExchangeErrorsDoNotLeakUpstreamContent(t *testing.T) {
+	cases := map[string]struct {
+		set  func(*oidctest.Settings)
+		want string
+	}{
+		"token 502 with token body": {
+			set:  func(s *oidctest.Settings) { s.Token = &oidctest.Response{Status: 502, Body: secretBody} },
+			want: "token endpoint: unsuccessful response (HTTP 502)",
+		},
+		"token error with description and uri": {
+			set: func(s *oidctest.Settings) {
+				s.Token = &oidctest.Response{Status: 400, Body: `{"error":"invalid_grant","error_description":"DESC-MARKER","error_uri":"https://x/URI-MARKER"}`}
+			},
+			want: "token endpoint: provider error invalid_grant (HTTP 400)",
+		},
+		"token nonstandard error code": {
+			set:  func(s *oidctest.Settings) { s.Token = &oidctest.Response{Status: 400, Body: `{"error":"CODE-MARKER"}`} },
+			want: "token endpoint: provider error other (HTTP 400)",
+		},
+		"token 200 without id_token": {
+			set: func(s *oidctest.Settings) {
+				s.Token = &oidctest.Response{Status: 200, Body: `{"access_token":"SECRET-MARKER","token_type":"Bearer"}`}
+			},
+			want: "token endpoint: response has no id_token",
+		},
+		"jwks 500 with body": {
+			set:  func(s *oidctest.Settings) { s.JWKS = &oidctest.Response{Status: 500, Body: secretBody} },
+			want: "id token: jwks fetch failed",
+		},
+		"jwks garbage": {
+			set:  func(s *oidctest.Settings) { s.JWKS = &oidctest.Response{Status: 200, Body: "not json MARKER"} },
+			want: "id token: jwks fetch failed",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, o := newOIDC(t)
+			ls := NewLoginState()
+			code, _ := login(t, o, ls)
+			p.Set(tc.set)
+			_, err := o.Exchange(context.Background(), code, ls)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			assertNoMarker(t, "error", err.Error())
+			assertNoMarker(t, "error %+v", fmt.Sprintf("%+v %#v", err, err))
+			if errors.Unwrap(err) != nil {
+				t.Error("error exposes its upstream cause via Unwrap")
+			}
+		})
+	}
+}
+
+func TestDiscoveryErrorsDoNotLeakUpstreamContent(t *testing.T) {
+	cases := map[string]struct {
+		resp oidctest.Response
+		want string
+	}{
+		"500 with body":  {oidctest.Response{Status: 500, Body: secretBody}, "discovery: unsuccessful response (HTTP 500)"},
+		"invalid json":   {oidctest.Response{Status: 200, Body: "<html>MARKER</html>"}, "discovery: invalid discovery document"},
+		"issuer differs": {oidctest.Response{Status: 200, Body: `{"issuer":"https://MARKER.example","jwks_uri":"x"}`}, "discovery: issuer mismatch"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := oidctest.NewServer("ipgate", "s3cret")
+			defer p.Close()
+			resp := tc.resp
+			p.Set(func(s *oidctest.Settings) { s.Discovery = &resp })
+			o := NewOIDC(OIDCConfig{Issuer: p.Issuer, ClientID: "ipgate"})
+			err := o.Discover()
+			if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want prefix %q", err, tc.want)
+			}
+			assertNoMarker(t, "error", err.Error())
+
+			// DiscoverLoop logs the same safe error.
+			var buf strings.Builder
+			var mu sync.Mutex
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				o.DiscoverLoop(ctx, slog.New(slog.NewJSONHandler(lockedWriter{&mu, &buf}, nil)))
+				close(done)
+			}()
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+			<-done
+			mu.Lock()
+			logs := buf.String()
+			mu.Unlock()
+			if !strings.Contains(logs, "oidc discovery failed") {
+				t.Fatalf("no discovery failure logged: %s", logs)
+			}
+			assertNoMarker(t, "discovery log", logs)
+		})
+	}
+}
+
+func TestDiscoveryUnreachable(t *testing.T) {
+	o := NewOIDC(OIDCConfig{Issuer: "http://127.0.0.1:1", ClientID: "ipgate"})
+	if err := o.Discover(); err == nil || err.Error() != "discovery: unreachable" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSafeOAuthCode(t *testing.T) {
+	if SafeOAuthCode("access_denied") != "access_denied" || SafeOAuthCode("<script>") != "other" || SafeOAuthCode("") != "other" {
+		t.Error("SafeOAuthCode allowlist broken")
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
