@@ -670,6 +670,9 @@ func TestLoginCookies(t *testing.T) {
 	if lc == nil {
 		t.Fatal("no login cookie")
 	}
+	if !strings.HasPrefix(lc.Name, "__Host-") || !strings.HasPrefix(sessionCookie, "__Host-") {
+		t.Error("cookies must use the __Host- prefix")
+	}
 	if !lc.HttpOnly || !lc.Secure || lc.SameSite != http.SameSiteLaxMode || lc.Path != "/" || lc.Domain != "" || lc.MaxAge != 600 {
 		t.Errorf("login cookie attributes: %+v", lc)
 	}
@@ -978,5 +981,19 @@ func TestStorageWriteFailureIsReported(t *testing.T) {
 	}
 	if e.check("203.0.113.5", nil) != 403 {
 		t.Error("failed write is active")
+	}
+}
+
+func TestPlainCookieNamesIgnored(t *testing.T) {
+	// A valid session value under the old unprefixed name (as a sibling subdomain
+	// could plant it) is not accepted.
+	e := newEnv(t, nil)
+	b := e.browser("203.0.113.5")
+	b.login(alice)
+	v := b.cookies[sessionCookie].Value
+	delete(b.cookies, sessionCookie)
+	b.cookies["ipgate_session"] = &http.Cookie{Name: "ipgate_session", Value: v}
+	if strings.Contains(bodyOf(t, b.do("GET", "/", nil)), "Log out") {
+		t.Error("unprefixed session cookie accepted")
 	}
 }

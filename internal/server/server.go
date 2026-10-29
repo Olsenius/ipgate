@@ -26,8 +26,11 @@ import (
 var webFS embed.FS
 
 const (
-	sessionCookie = "ipgate_session"
-	loginCookie   = "ipgate_login"
+	// The __Host- prefix makes browsers reject these cookies unless they are
+	// Secure, Path=/ and have no Domain, so a sibling subdomain cannot plant or
+	// shadow them.
+	sessionCookie = "__Host-ipgate_session"
+	loginCookie   = "__Host-ipgate_login"
 	loginTTL      = 10 * time.Minute
 	maxUserAgent  = 200
 	maxFormBytes  = 8 << 10
