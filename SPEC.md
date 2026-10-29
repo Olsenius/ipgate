@@ -102,7 +102,10 @@ via hash or a tiny embedded CSS file).
 - CSRF: per-session token (for example HMAC of session id) as a hidden field on every form; check on every POST.
   Also reject POSTs whose `Origin` header is present and not equal to `PUBLIC_URL`'s origin.
 - Security headers on UI responses: `Content-Security-Policy`, `X-Frame-Options: DENY`,
-  `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`.
+  `Referrer-Policy: same-origin`, `X-Content-Type-Options: nosniff`. (Changed from `no-referrer` after
+  production testing, 2026-10-29: with `no-referrer`, browsers send `Origin: null` on same-origin form POSTs,
+  so the Origin check rejected every form. `same-origin` still sends no referrer to other sites. `Origin: null`
+  stays rejected.)
 
 ### 3.4 Storage
 

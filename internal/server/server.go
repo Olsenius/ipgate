@@ -246,7 +246,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Content-Security-Policy", s.csp)
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
+		// Not "no-referrer": with that policy browsers send "Origin: null" on
+		// same-origin form POSTs (Fetch spec, "serializing a request origin"),
+		// which the Origin check must reject. "same-origin" still sends no
+		// referrer to other sites, and our own POSTs carry the real Origin.
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)

@@ -354,7 +354,7 @@ func TestSecurityHeaders(t *testing.T) {
 		h := resp.Header
 		if !strings.Contains(h.Get("Content-Security-Policy"), "default-src 'self'") ||
 			h.Get("X-Frame-Options") != "DENY" ||
-			h.Get("Referrer-Policy") != "no-referrer" ||
+			h.Get("Referrer-Policy") != "same-origin" ||
 			h.Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("%s: missing security headers: %v", path, h)
 		}
@@ -1022,4 +1022,32 @@ func logEvent(t *testing.T, logs, msg string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// TestReferrerPolicyKeepsOriginOnForms pins Referrer-Policy to "same-origin".
+// With "no-referrer", real browsers send "Origin: null" on same-origin form
+// POSTs, so every /allow was rejected in production. Do not change it to
+// no-referrer, and keep rejecting Origin: null.
+func TestReferrerPolicyKeepsOriginOnForms(t *testing.T) {
+	e := newEnv(t, nil)
+	b := e.browser("203.0.113.5")
+	b.login(alice)
+	for _, path := range []string{"/", "/login", "/nope"} {
+		if got := e.browser("203.0.113.5").do("GET", path, nil).Header.Get("Referrer-Policy"); got != "same-origin" {
+			t.Errorf("%s: Referrer-Policy = %q, want same-origin", path, got)
+		}
+	}
+	if got := b.do("GET", "/", nil).Header.Get("Referrer-Policy"); got != "same-origin" {
+		t.Errorf("logged-in page: Referrer-Policy = %q", got)
+	}
+	// What a browser sends under same-origin policy: the real origin. Accepted.
+	b.headers["Origin"] = publicURL
+	if loc := b.post("/allow", url.Values{"duration": {"24h0m0s"}}).Header.Get("Location"); loc != "/?m=allowed" {
+		t.Errorf("same-origin POST rejected: %q", loc)
+	}
+	// What a browser sends under no-referrer (or from a sandboxed/opaque context). Still rejected.
+	b.headers["Origin"] = "null"
+	if resp := b.post("/revoke", url.Values{"ip": {"203.0.113.5"}}); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Origin: null accepted: %d", resp.StatusCode)
+	}
 }

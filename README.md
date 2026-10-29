@@ -158,7 +158,9 @@ development-only; it is not in the Docker image.
 - Every POST requires a per-session CSRF token, and POSTs with an `Origin` other than `PUBLIC_URL` are
   rejected.
 - UI responses carry a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`,
-  `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+  `Referrer-Policy: same-origin` and `X-Content-Type-Options: nosniff`. The referrer policy is deliberately
+  not `no-referrer`: under that policy browsers send `Origin: null` on same-origin form POSTs, which the Origin
+  check (correctly) rejects. `same-origin` sends no referrer to other sites.
 - Logs (JSON on stdout) record logins, allows and revokes with user and IP; `/check` is logged only at
   `debug`. ipgate never logs its cookies, secrets or the provider's tokens. OIDC failures are logged as fixed
   categories (e.g. `token endpoint: unsuccessful response (HTTP 502)`), never as upstream response bodies, raw
