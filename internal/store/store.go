@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -38,22 +39,61 @@ func Key(a netip.Addr) netip.Prefix {
 	return p
 }
 
+// ErrNotDurable means a change was written and renamed into place (it is visible
+// on disk and in memory) but syncing the directory failed, so it may not survive
+// a crash. Callers should report and log it; the change itself is in effect.
+var ErrNotDurable = errors.New("allowlist change applied but not confirmed durable")
+
+// fileOps are the filesystem steps of a write, replaceable in tests to inject faults.
+type fileOps struct {
+	createTemp func(dir, pattern string) (*os.File, error)
+	write      func(f *os.File, b []byte) error
+	syncFile   func(f *os.File) error
+	rename     func(oldpath, newpath string) error
+	syncDir    func(dir string) error
+}
+
+var osOps = fileOps{
+	createTemp: os.CreateTemp,
+	write:      func(f *os.File, b []byte) error { _, err := f.Write(b); return err },
+	syncFile:   (*os.File).Sync,
+	rename:     os.Rename,
+	syncDir: func(dir string) error {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		if err := d.Sync(); err != nil {
+			d.Close()
+			return err
+		}
+		return d.Close()
+	},
+}
+
 // Store is a concurrency-safe allowlist backed by a JSON file.
+//
+// Readers (Lookup, List) never wait for disk I/O: mutations are serialized by
+// wmu, build a new map, write it to disk without holding mu, and only then
+// publish it with a brief exclusive lock. Published maps are never modified.
 type Store struct {
 	path string
 	now  func() time.Time
+	ops  fileOps
 
-	mu      sync.RWMutex
+	wmu     sync.Mutex   // serializes mutations and file writes
+	mu      sync.RWMutex // guards the entries pointer only
 	entries map[netip.Prefix]Entry
 }
 
-// Open loads the allowlist from path. A missing file yields an empty store; a corrupt
-// file is an error. Expired entries are dropped at load.
+// Open loads the allowlist from path. A missing file yields an empty store; a
+// corrupt or malformed file is an error and is left untouched. Expired entries are
+// dropped at load.
 func Open(path string, now func() time.Time) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Store{path: path, now: now, entries: make(map[netip.Prefix]Entry)}
+	s := &Store{path: path, now: now, ops: osOps, entries: map[netip.Prefix]Entry{}}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -76,7 +116,7 @@ func Open(path string, now func() time.Time) (*Store, error) {
 		s.entries[Key(e.IP)] = e
 	}
 	if pruned {
-		if err := s.writeLocked(); err != nil {
+		if err := s.persist(s.entries); err != nil {
 			return nil, err
 		}
 	}
@@ -135,7 +175,16 @@ func Validate(e Entry) error {
 	return nil
 }
 
-// Lookup reports whether a is covered by an unexpired entry. It does no I/O.
+// snapshot returns the current published map. It must not be modified.
+func (s *Store) snapshot() map[netip.Prefix]Entry {
+	s.mu.RLock()
+	m := s.entries
+	s.mu.RUnlock()
+	return m
+}
+
+// Lookup reports whether a is covered by an unexpired entry. It does no I/O and
+// never waits for a write in progress.
 func (s *Store) Lookup(a netip.Addr) (Entry, bool) {
 	k := Key(a)
 	s.mu.RLock()
@@ -147,86 +196,97 @@ func (s *Store) Lookup(a netip.Addr) (Entry, bool) {
 	return e, true
 }
 
-// Put adds or refreshes the entry for e.IP (taking ownership) and persists the change.
+// commit writes next to disk and publishes it. Caller holds wmu. If the write
+// fails before the rename, nothing changed and the old map stays published. If
+// only the directory sync fails, the new file is in place, so next is published
+// (memory matches disk) and the ErrNotDurable error is returned.
+func (s *Store) commit(next map[netip.Prefix]Entry) error {
+	err := s.persist(next)
+	if err != nil && !errors.Is(err, ErrNotDurable) {
+		return err
+	}
+	s.mu.Lock()
+	s.entries = next
+	s.mu.Unlock()
+	return err
+}
+
+// Put adds or refreshes the entry for e.IP (taking ownership) and persists the
+// change. A returned ErrNotDurable means the entry is active but may not survive
+// a crash.
 func (s *Store) Put(e Entry) error {
 	e.IP = e.IP.Unmap().WithZone("")
 	if err := Validate(e); err != nil {
 		return err
 	}
-	k := Key(e.IP)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	old, had := s.entries[k]
-	s.entries[k] = e
-	if err := s.writeLocked(); err != nil {
-		if had {
-			s.entries[k] = old
-		} else {
-			delete(s.entries, k)
-		}
-		return err
-	}
-	return nil
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	next := maps.Clone(s.snapshot())
+	next[Key(e.IP)] = e
+	return s.commit(next)
 }
 
 // RemoveIf deletes the entry covering a if allow returns true for it. found reports
-// whether an (unexpired) entry existed; removed whether it was deleted.
+// whether an (unexpired) entry existed; removed whether the removal is in effect
+// (it is also in effect when err is ErrNotDurable).
 func (s *Store) RemoveIf(a netip.Addr, allow func(Entry) bool) (e Entry, found, removed bool, err error) {
 	k := Key(a)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[k]
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	cur := s.snapshot()
+	e, ok := cur[k]
 	if !ok || !e.ExpiresAt.After(s.now()) {
 		return Entry{}, false, false, nil
 	}
 	if !allow(e) {
 		return e, true, false, nil
 	}
-	delete(s.entries, k)
-	if err := s.writeLocked(); err != nil {
-		s.entries[k] = e
-		return e, true, false, err
+	next := maps.Clone(cur)
+	delete(next, k)
+	if err := s.commit(next); err != nil {
+		return e, true, errors.Is(err, ErrNotDurable), err
 	}
 	return e, true, true, nil
 }
 
-// List returns unexpired entries, soonest expiry last, filtered by keep (nil = all).
+// List returns unexpired entries, latest expiry first, filtered by keep (nil = all).
 func (s *Store) List(keep func(Entry) bool) []Entry {
 	t := s.now()
-	s.mu.RLock()
-	out := make([]Entry, 0, len(s.entries))
-	for _, e := range s.entries {
+	m := s.snapshot()
+	out := make([]Entry, 0, len(m))
+	for _, e := range m {
 		if e.ExpiresAt.After(t) && (keep == nil || keep(e)) {
 			out = append(out, e)
 		}
 	}
-	s.mu.RUnlock()
 	sortEntries(out)
 	return out
 }
 
-// Prune removes expired entries and persists if anything changed.
+// Prune removes expired entries and persists if anything changed. The count is
+// also returned with ErrNotDurable (the removal is in effect).
 func (s *Store) Prune() (int, error) {
 	t := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	removed := map[netip.Prefix]Entry{}
-	for k, e := range s.entries {
-		if !e.ExpiresAt.After(t) {
-			removed[k] = e
-			delete(s.entries, k)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	cur := s.snapshot()
+	next := make(map[netip.Prefix]Entry, len(cur))
+	for k, e := range cur {
+		if e.ExpiresAt.After(t) {
+			next[k] = e
 		}
 	}
-	if len(removed) == 0 {
+	n := len(cur) - len(next)
+	if n == 0 {
 		return 0, nil
 	}
-	if err := s.writeLocked(); err != nil {
-		for k, e := range removed {
-			s.entries[k] = e
+	if err := s.commit(next); err != nil {
+		if errors.Is(err, ErrNotDurable) {
+			return n, err
 		}
 		return 0, err
 	}
-	return len(removed), nil
+	return n, nil
 }
 
 // RunPruner calls Prune every interval until ctx is done.
@@ -255,11 +315,12 @@ func sortEntries(es []Entry) {
 	})
 }
 
-// writeLocked atomically writes the allowlist: temp file in the same directory,
-// fsync, rename, fsync directory. Caller holds s.mu.
-func (s *Store) writeLocked() error {
-	list := make([]Entry, 0, len(s.entries))
-	for _, e := range s.entries {
+// persist atomically replaces the file with entries: temp file in the same
+// directory, write, fsync, rename, fsync directory. Errors before the rename leave
+// the old file in place. A failed directory sync is wrapped in ErrNotDurable.
+func (s *Store) persist(entries map[netip.Prefix]Entry) error {
+	list := make([]Entry, 0, len(entries))
+	for _, e := range entries {
 		list = append(list, e)
 	}
 	sortEntries(list)
@@ -270,14 +331,14 @@ func (s *Store) writeLocked() error {
 	b = append(b, '\n')
 
 	dir := filepath.Dir(s.path)
-	f, err := os.CreateTemp(dir, ".allowlist-*.tmp")
+	f, err := s.ops.createTemp(dir, ".allowlist-*.tmp")
 	if err != nil {
 		return fmt.Errorf("write allowlist: %w", err)
 	}
 	tmp := f.Name()
-	ok := false
+	renamed := false
 	defer func() {
-		if !ok {
+		if !renamed {
 			f.Close()
 			os.Remove(tmp)
 		}
@@ -285,22 +346,29 @@ func (s *Store) writeLocked() error {
 	if err := f.Chmod(0o600); err != nil {
 		return fmt.Errorf("write allowlist: %w", err)
 	}
-	if _, err := f.Write(b); err != nil {
+	if err := s.ops.write(f, b); err != nil {
 		return fmt.Errorf("write allowlist: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("write allowlist: %w", err)
+	if err := s.ops.syncFile(f); err != nil {
+		return fmt.Errorf("write allowlist: fsync: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("write allowlist: %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("write allowlist: %w", err)
+	if err := s.ops.rename(tmp, s.path); err != nil {
+		return fmt.Errorf("write allowlist: rename: %w", err)
 	}
-	ok = true
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
+	renamed = true
+	if err := s.ops.syncDir(dir); err != nil {
+		return fmt.Errorf("%w: directory fsync: %v", ErrNotDurable, err)
 	}
 	return nil
+}
+
+// SetDirSyncForTest replaces the directory-sync step so other packages' tests can
+// simulate ErrNotDurable. Not for production use.
+func (s *Store) SetDirSyncForTest(f func(dir string) error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	s.ops.syncDir = f
 }

@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -926,5 +928,55 @@ func TestCallbackFailureLogsContainNoUpstreamContent(t *testing.T) {
 				t.Errorf("page leaks upstream content:\n%s", page)
 			}
 		})
+	}
+}
+
+func TestStorageNotDurableIsReported(t *testing.T) {
+	e := newEnv(t, nil)
+	b := e.browser("203.0.113.5")
+	b.login(alice)
+	e.store.SetDirSyncForTest(func(string) error { return errors.New("injected EIO") })
+
+	if loc := b.post("/allow", url.Values{"duration": {"24h0m0s"}}).Header.Get("Location"); loc != "/?m=unsynced" {
+		t.Fatalf("allow: %q", loc)
+	}
+	if e.check("203.0.113.5", nil) != 204 {
+		t.Error("entry on disk but not active")
+	}
+	page := bodyOf(t, b.do("GET", "/?m=unsynced", nil))
+	if !strings.Contains(page, "could not confirm it was saved to disk") {
+		t.Error("durability warning not shown")
+	}
+	if loc := b.post("/revoke", url.Values{"ip": {"203.0.113.5"}}).Header.Get("Location"); loc != "/?m=unsynced" {
+		t.Fatalf("revoke: %q", loc)
+	}
+	if e.check("203.0.113.5", nil) != 403 {
+		t.Error("revoke not in effect after directory sync failure (must fail closed)")
+	}
+	logs := e.logs.String()
+	for _, want := range []string{"ip allowed but not confirmed durable", "ip revoked but not confirmed durable"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs missing %q", want)
+		}
+	}
+}
+
+func TestStorageWriteFailureIsReported(t *testing.T) {
+	e := newEnv(t, nil)
+	b := e.browser("203.0.113.5")
+	b.login(alice)
+	if err := os.Chmod(e.cfg.DataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(e.cfg.DataDir, 0o700)
+	if f, err := os.CreateTemp(e.cfg.DataDir, "probe"); err == nil {
+		f.Close()
+		t.Skip("directory still writable (running as root?)")
+	}
+	if loc := b.post("/allow", url.Values{"duration": {"24h0m0s"}}).Header.Get("Location"); loc != "/?m=error" {
+		t.Fatalf("allow: %q", loc)
+	}
+	if e.check("203.0.113.5", nil) != 403 {
+		t.Error("failed write is active")
 	}
 }

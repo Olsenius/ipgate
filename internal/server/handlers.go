@@ -26,6 +26,7 @@ var flashes = map[string]flash{
 	"notfound": {"bad", "No active entry found for that address."},
 	"expired":  {"bad", "Your session has expired. Please log in again."},
 	"error":    {"bad", "Something went wrong. Please try again."},
+	"unsynced": {"bad", "The change is in effect, but the server could not confirm it was saved to disk, so it might be lost if the server crashes. Please tell an administrator."},
 }
 
 type durationOption struct {
@@ -231,13 +232,19 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, sess auth.Session
 		ExpiresAt: now.Add(ttl),
 		UserAgent: truncate(r.UserAgent(), maxUserAgent),
 	}
-	if err := s.store.Put(e); err != nil {
+	err := s.store.Put(e)
+	switch {
+	case errors.Is(err, store.ErrNotDurable):
+		// The entry is in effect (on disk and in memory) but may not survive a crash.
+		s.log.Error("ip allowed but not confirmed durable", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339), "err", err)
+		http.Redirect(w, r, "/?m=unsynced", http.StatusSeeOther)
+	case err != nil:
 		s.log.Error("allow failed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "err", err)
 		http.Redirect(w, r, "/?m=error", http.StatusSeeOther)
-		return
+	default:
+		s.log.Info("ip allowed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339))
+		http.Redirect(w, r, "/?m=allowed", http.StatusSeeOther)
 	}
-	s.log.Info("ip allowed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339))
-	http.Redirect(w, r, "/?m=allowed", http.StatusSeeOther)
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request, sess auth.Session) {
@@ -248,6 +255,11 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request, sess auth.Sessio
 	}
 	e, found, removed, err := s.store.RemoveIf(ip, func(e store.Entry) bool { return sess.Admin || e.Sub == sess.Sub })
 	switch {
+	case removed && errors.Is(err, store.ErrNotDurable):
+		// Access is already revoked in memory (fail closed); a crash before the
+		// directory update is durable could bring the old file back.
+		s.log.Error("ip revoked but not confirmed durable", "user", sess.Name, "sub", sess.Sub, "admin", sess.Admin, "ip", e.IP.String(), "owner", e.User, "owner_sub", e.Sub, "err", err)
+		http.Redirect(w, r, "/?m=unsynced", http.StatusSeeOther)
 	case err != nil:
 		s.log.Error("revoke failed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "err", err)
 		http.Redirect(w, r, "/?m=error", http.StatusSeeOther)

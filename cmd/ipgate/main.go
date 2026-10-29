@@ -81,7 +81,7 @@ func run() error {
 	go oidc.DiscoverLoop(ctx, log)
 	go st.RunPruner(ctx, 10*time.Minute, func(n int, err error) {
 		if err != nil {
-			log.Error("prune failed", "err", err)
+			log.Error("prune failed or not confirmed durable", "pruned", n, "err", err)
 		} else if n > 0 {
 			log.Info("pruned expired entries", "count", n)
 		}
