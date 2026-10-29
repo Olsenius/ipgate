@@ -188,6 +188,11 @@ Fail fast with a clear message on missing/invalid config, including a missing or
     wrong nonce, wrong audience and group not allowed.
 - `go vet` and `gofmt` clean. A GitHub Actions workflow (`.github/workflows/ci.yml`) running vet, tests with
   `-race`, and `docker build` on push and PR.
+- CI publishes a private image to `ghcr.io/olsenius/ipgate` (linux/amd64) with `docker/build-push-action`,
+  only for pushes to `main` and `v*` tags and only after the test and docker jobs pass; pull requests never
+  publish. It uses `GITHUB_TOKEN` with job-level `packages: write` (workflow default `contents: read`). Tags:
+  `sha-<7-char sha>` and `main` on main; `v1.2.3`, `1.2`, `1` for tag `v1.2.3`; no `latest`. OCI labels
+  source, revision and created. Deployments pin `sha-` tags. (Added 2026-10-29; replaces building on VM 300.)
 - README (English): what it is, config table, Caddy snippet, how to run tests, how to build the image, and the
   security model (trust boundary = Caddy; never expose port 8080 directly).
 
@@ -195,7 +200,8 @@ Fail fast with a clear message on missing/invalid config, including a missing or
 
 - Creating the OIDC client and groups in Pocket ID, secrets in 1Password, the compose service, Caddy routes,
   deploying to VM 300, and opening Jellyfin/Seerr. Do not touch the homelab.
-- Publishing images to a registry. VM 300 will build from a clone of this repo.
+- ~~Publishing images to a registry. VM 300 will build from a clone of this repo.~~ Now in scope: CI publishes
+  the image (see §4); pulling and deploying it on VM 300 remains homelab-admin's job.
 
 ## 6. Acceptance
 

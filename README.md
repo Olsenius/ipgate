@@ -75,6 +75,32 @@ the header trustworthy. Hairpin traffic from the home LAN arrives as `10.116.0.1
 
 ## Docker
 
+### Prebuilt image
+
+CI publishes a private image to `ghcr.io/olsenius/ipgate` (linux/amd64) after the tests and the image smoke
+test pass. Only pushes to `main` and `v*` tags publish; pull requests never do.
+
+| Trigger | Tags |
+|---|---|
+| push to `main` | `sha-<7-char commit>` and `main` |
+| git tag `v1.2.3` | `v1.2.3`, `1.2` and `1` |
+
+Images carry the OCI labels `org.opencontainers.image.source`, `.revision` (the commit) and `.created`.
+
+To pull, create a **classic** personal access token with only the `read:packages` scope (GitHub → Settings →
+Developer settings → Personal access tokens → Tokens (classic)), then log in once on the host:
+
+```sh
+echo "$GHCR_READ_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
+docker pull ghcr.io/olsenius/ipgate:sha-0123abc
+```
+
+**Deployments should pin a `sha-<commit>` tag**, which always refers to a build of that one commit; `main` and
+the short semver tags move. For a byte-identical pin, add the digest (`...:sha-0123abc@sha256:...`). To find the
+commit an image was built from: `docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' <image>`.
+
+### Building locally
+
 ```sh
 docker build -t ipgate .
 ```
@@ -85,7 +111,7 @@ compose instead. Example compose service (no published port):
 
 ```yaml
   ipgate:
-    build: ./ipgate
+    image: ghcr.io/olsenius/ipgate:sha-0123abc   # pin a sha- tag; or `build: ./ipgate`
     restart: unless-stopped
     environment:
       PUBLIC_URL: https://enable.gullane.no
