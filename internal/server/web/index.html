@@ -1,0 +1,87 @@
+{{define "index"}}{{template "head" .}}
+<h1>Access to Jellyfin and Seerr</h1>
+
+{{with .Flash}}<p class="flash {{.Kind}}" role="status">{{.Text}}</p>{{end}}
+
+<section class="card">
+  <p class="label">Your IP address</p>
+  <p class="ip">{{if .IP}}{{.IP}}{{else}}unknown{{end}}</p>
+  {{if .LoggedIn}}
+    {{if not .IP}}
+      <p class="status bad">Could not determine your IP address.</p>
+    {{else if .AlwaysAllowed}}
+      <p class="status ok">This address always has access (local network).</p>
+    {{else if .Allowed}}
+      <p class="status ok">Allowed until {{.AllowedUntil}}</p>
+    {{else if .Private}}
+      <p class="status bad">This is a private or local address and cannot be allowed.</p>
+    {{else}}
+      <p class="status bad">Not allowed</p>
+    {{end}}
+  {{end}}
+</section>
+
+{{if not .LoggedIn}}
+<p>Log in to give this IP address access to Jellyfin and Seerr. Every device on the same network (TV, phone, tablet) then gets access.</p>
+<p><a class="button" href="/login">Log in</a></p>
+{{else}}
+
+{{if .CanAllow}}
+<section class="card">
+  <h2>{{if .Allowed}}Extend access{{else}}Allow access{{end}}</h2>
+  <form method="post" action="/allow">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <fieldset>
+      <legend>For how long?</legend>
+      {{range .Durations}}
+      <label class="choice"><input type="radio" name="duration" value="{{.Value}}"{{if .Selected}} checked{{end}}> {{.Label}}</label>
+      {{end}}
+    </fieldset>
+    <p class="hint">On mobile data? Choose 1 day. Mobile carriers share IP addresses between many customers (CGNAT), so others may get access from the same address.</p>
+    <button type="submit">{{if .Allowed}}Extend{{else}}Allow this IP address{{end}}</button>
+  </form>
+</section>
+{{end}}
+
+<section>
+  <h2>Your entries</h2>
+  {{if .Mine}}{{template "entries" (entries .Mine .CSRF)}}{{else}}<p class="muted">You have no active entries.</p>{{end}}
+</section>
+
+{{if .Admin}}
+<section>
+  <h2>All entries (admin)</h2>
+  {{if .All}}{{template "entries" (entries .All .CSRF)}}{{else}}<p class="muted">No active entries.</p>{{end}}
+</section>
+{{end}}
+
+<form method="post" action="/logout" class="logout">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <span class="muted">Logged in as {{.Name}}</span>
+  <button type="submit" class="secondary">Log out</button>
+</form>
+{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "entries"}}
+<ul class="entries">
+  {{range .Entries}}
+  <li>
+    <div class="entry-main">
+      <span class="ip">{{.IP}}</span>
+      <span class="muted">{{.User}}</span>
+    </div>
+    <dl>
+      <dt>Created</dt><dd>{{.Created}}</dd>
+      <dt>Expires</dt><dd>{{.Expires}}</dd>
+      {{if .UserAgent}}<dt>Browser</dt><dd class="ua">{{.UserAgent}}</dd>{{end}}
+    </dl>
+    <form method="post" action="/revoke">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <input type="hidden" name="ip" value="{{.IP}}">
+      <button type="submit" class="danger">Remove</button>
+    </form>
+  </li>
+  {{end}}
+</ul>
+{{end}}
