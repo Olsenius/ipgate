@@ -258,7 +258,7 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request, sess auth.Sessio
 	case removed && errors.Is(err, store.ErrNotDurable):
 		// Access is already revoked in memory (fail closed); a crash before the
 		// directory update is durable could bring the old file back.
-		s.log.Error("ip revoked but not confirmed durable", "user", sess.Name, "sub", sess.Sub, "admin", sess.Admin, "ip", e.IP.String(), "owner", e.User, "owner_sub", e.Sub, "err", err)
+		s.log.Error("ip revoked but not confirmed durable", "user", sess.Name, "sub", sess.Sub, "admin", sess.Admin, "ip", e.IP.String(), "owner", e.User, "owner_sub", e.Sub, "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339), "err", err)
 		http.Redirect(w, r, "/?m=unsynced", http.StatusSeeOther)
 	case err != nil:
 		s.log.Error("revoke failed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "err", err)

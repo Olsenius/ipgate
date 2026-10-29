@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -956,10 +957,23 @@ func TestStorageNotDurableIsReported(t *testing.T) {
 	if e.check("203.0.113.5", nil) != 403 {
 		t.Error("revoke not in effect after directory sync failure (must fail closed)")
 	}
-	logs := e.logs.String()
-	for _, want := range []string{"ip allowed but not confirmed durable", "ip revoked but not confirmed durable"} {
-		if !strings.Contains(logs, want) {
-			t.Errorf("logs missing %q", want)
+	// Both warning events carry the same audit fields as the normal events.
+	for _, msg := range []string{"ip allowed but not confirmed durable", "ip revoked but not confirmed durable"} {
+		ev := logEvent(t, e.logs.String(), msg)
+		if ev == nil {
+			t.Errorf("logs missing %q", msg)
+			continue
+		}
+		for _, k := range []string{"user", "sub", "ip", "expires_at", "err"} {
+			if v, _ := ev[k].(string); v == "" {
+				t.Errorf("%q event missing %s: %v", msg, k, ev)
+			}
+		}
+		if exp, _ := ev["expires_at"].(string); exp != "" {
+			ts, err := time.Parse(time.RFC3339, exp)
+			if err != nil || !strings.HasSuffix(exp, "Z") || time.Until(ts) < 23*time.Hour {
+				t.Errorf("%q expires_at = %q, want UTC RFC 3339 about 24h ahead", msg, exp)
+			}
 		}
 	}
 }
@@ -996,4 +1010,16 @@ func TestPlainCookieNamesIgnored(t *testing.T) {
 	if strings.Contains(bodyOf(t, b.do("GET", "/", nil)), "Log out") {
 		t.Error("unprefixed session cookie accepted")
 	}
+}
+
+// logEvent returns the first JSON log event with the given msg.
+func logEvent(t *testing.T, logs, msg string) map[string]any {
+	t.Helper()
+	for line := range strings.SplitSeq(logs, "\n") {
+		var ev map[string]any
+		if json.Unmarshal([]byte(line), &ev) == nil && ev["msg"] == msg {
+			return ev
+		}
+	}
+	return nil
 }
