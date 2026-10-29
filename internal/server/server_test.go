@@ -1051,3 +1051,66 @@ func TestReferrerPolicyKeepsOriginOnForms(t *testing.T) {
 		t.Errorf("Origin: null accepted: %d", resp.StatusCode)
 	}
 }
+
+// TestUINamesNoProtectedService renders every page and message the UI can
+// produce, plus the /check 403 body, and checks none names a protected service.
+func TestUINamesNoProtectedService(t *testing.T) {
+	var pages []string
+	add := func(what string, r *http.Response) { pages = append(pages, what+"\n"+bodyOf(t, r)) }
+
+	e := newEnv(t, func(c *config.Config) {
+		c.AllowedGroups = []string{"media"}
+		c.AdminGroups = []string{"admins"}
+	})
+	add("anonymous index", e.browser("203.0.113.5").do("GET", "/", nil))
+	add("stylesheet", e.browser("").do("GET", "/static/style.css", nil))
+
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Client-IP", "203.0.113.99")
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	pages = append(pages, "check 403\n"+rec.Body.String())
+
+	ad := e.browser("203.0.113.5")
+	ad.login(admin)
+	ad.post("/allow", url.Values{"duration": {"24h0m0s"}})
+	for code := range flashes {
+		add("flash "+code, ad.do("GET", "/?m="+code, nil))
+	}
+	add("private ip index", (&browser{e: e, ip: "192.168.1.2", cookies: ad.cookies, headers: map[string]string{}}).do("GET", "/", nil))
+	add("bad csrf", ad.do("POST", "/allow", url.Values{"csrf": {"x"}}))
+	add("cross origin", (&browser{e: e, ip: "203.0.113.5", cookies: ad.cookies, headers: map[string]string{"Origin": "null"}}).do("POST", "/allow", url.Values{}))
+
+	b := e.browser("198.51.100.9")
+	b.login(bob)
+	add("revoke forbidden", b.post("/revoke", url.Values{"ip": {"203.0.113.5"}}))
+
+	denied := e.browser("203.0.113.7")
+	e.op.Set(func(s *oidctest.Settings) {
+		*s = oidctest.Settings{User: oidctest.User{Sub: "x", Name: "X", Groups: []string{"other"}}}
+	})
+	add("group denied", denied.do("GET", denied.startLogin(), nil))
+	add("login failed", e.browser("203.0.113.7").do("GET", "/auth/callback?code=x&state=y", nil))
+
+	o := auth.NewOIDC(auth.OIDCConfig{Issuer: "http://127.0.0.1:1"})
+	s, _ := New(e.cfg, e.store, o, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/login", nil))
+	pages = append(pages, "login unavailable\n"+rec.Body.String())
+
+	for _, p := range pages {
+		what, body, _ := strings.Cut(p, "\n")
+		if body == "" {
+			t.Errorf("%s: empty body", what)
+		}
+		low := strings.ToLower(body)
+		for _, name := range []string{"jellyfin", "seerr"} {
+			if strings.Contains(low, name) {
+				t.Errorf("%s names %q:\n%s", what, name, body)
+			}
+		}
+	}
+	if len(pages) < 15 {
+		t.Errorf("only %d pages checked", len(pages))
+	}
+}

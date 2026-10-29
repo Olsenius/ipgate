@@ -1,5 +1,5 @@
 {{define "index"}}{{template "head" .}}
-<h1>Access to Jellyfin and Seerr</h1>
+<h1>Access</h1>
 
 {{with .Flash}}<p class="flash {{.Kind}}" role="status">{{.Text}}</p>{{end}}
 
@@ -22,7 +22,7 @@
 </section>
 
 {{if not .LoggedIn}}
-<p>Log in to give this IP address access to Jellyfin and Seerr. Every device on the same network (TV, phone, tablet) then gets access.</p>
+<p>Log in to give this IP address access. Every device on the same network (TV, phone, tablet) then gets access.</p>
 <p><a class="button" href="/login">Log in</a></p>
 {{else}}
 

@@ -2,10 +2,10 @@
 
 IP allowlist gate for Caddy `forward_auth`, with Pocket ID (OIDC, passkeys) login.
 
-Jellyfin and Seerr are exposed on the internet behind Caddy, but every IP is denied by default.
+Self-hosted services are exposed on the internet behind Caddy, but every IP is denied by default.
 Someone who visits `https://enable.gullane.no` and logs in with Pocket ID gets their current public IP
 added to an allowlist for a limited time. After that, every device behind that IP (TVs, phones,
-Jellyfin apps that cannot do SSO) can reach Jellyfin and Seerr.
+apps that cannot do SSO) can reach the protected services.
 
 ipgate is one small Go service with two jobs:
 
@@ -49,16 +49,16 @@ ID token.
 ## Caddy
 
 ```caddyfile
-	@media host jellyfin.gullane.no seerr.gullane.no
-	handle @media {
+	@protected host app1.gullane.no app2.gullane.no
+	handle @protected {
 		forward_auth ipgate:8080 {
 			uri /check
 			header_up X-Client-IP {client_ip}
 		}
-		@jellyfin host jellyfin.gullane.no
-		reverse_proxy @jellyfin <jellyfin-ip>:8096
-		@seerr host seerr.gullane.no
-		reverse_proxy @seerr <seerr-ip>:5055
+		@app1 host app1.gullane.no
+		reverse_proxy @app1 <app1-ip>:<port>
+		@app2 host app2.gullane.no
+		reverse_proxy @app2 <app2-ip>:<port>
 	}
 
 	@enable host enable.gullane.no

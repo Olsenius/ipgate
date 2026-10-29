@@ -11,6 +11,9 @@ Expose Jellyfin (`jellyfin.gullane.no`) and Seerr (`seerr.gullane.no`) on the in
 (passkeys, OIDC) gets their current public IP added to an allowlist for a limited time. After that, every device
 behind that IP (TVs, phones, Jellyfin apps that cannot do SSO) can reach Jellyfin and Seerr.
 
+The services named here are background only. ipgate's UI and responses must stay neutral and never name a
+protected service (see §3.2). (Added after production testing, 2026-10-29.)
+
 ipgate is one small Go service that does two jobs:
 
 1. **Check endpoint** for Caddy `forward_auth`: "is this client IP allowed right now?"
@@ -68,6 +71,10 @@ All UI text in **English** (changed from Norwegian 2026-10-29), simple and mobil
 inline stylesheet, no JavaScript frameworks, no external assets (CSP: `default-src 'self'`, inline style allowed
 via hash or a tiny embedded CSS file).
 
+- The UI must not name Jellyfin, Seerr or any other protected service anywhere: page titles, headings, texts,
+  error pages and the `/check` 403 body use neutral wording (heading "Access"; "Log in to give this IP address
+  access. Every device on the same network (TV, phone, tablet) then gets access."). (Added after production
+  testing, 2026-10-29.)
 - `GET /`: not logged in → page with the visitor's IP and a "Log in" button (→ `/login`). Logged in →
   - the visitor's current IP and whether it is already allowed (and until when),
   - a form to allow this IP with a duration choice: 1 day, 7 days (default), 30 days (only durations
