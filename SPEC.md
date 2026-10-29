@@ -97,6 +97,8 @@ via hash or a tiny embedded CSS file).
 - Session = signed cookie (HMAC-SHA256 with `SESSION_SECRET`), containing `sub`, display name, admin flag,
   issued/expiry (`SESSION_TTL`, default 12h). Cookie: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, host-only.
   Constant-time signature comparison. No server-side session store needed.
+- Cookie names use the `__Host-` prefix (`__Host-ipgate_session`, `__Host-ipgate_login`) so a sibling subdomain
+  cannot plant or shadow them. (Added after review round 1, 2026-10-29.)
 - CSRF: per-session token (for example HMAC of session id) as a hidden field on every form; check on every POST.
   Also reject POSTs whose `Origin` header is present and not equal to `PUBLIC_URL`'s origin.
 - Security headers on UI responses: `Content-Security-Policy`, `X-Frame-Options: DENY`,
@@ -107,10 +109,21 @@ via hash or a tiny embedded CSS file).
 - JSON file `DATA_DIR/allowlist.json`: list of entries
   `{ip, sub, user, created_at, expires_at, user_agent}`. One entry per IP (re-allowing refreshes it and takes
   ownership).
-- Loaded at start; held in memory behind a `sync.RWMutex`; written atomically (temp file + `fsync` + rename) on
-  every change. Expired entries are pruned at load and by a background ticker (every 10 min), and ignored by
-  `/check` even before pruning.
-- Corrupt file at start → log an error and refuse to start (do not silently drop the allowlist).
+- Loaded at start; held in memory behind a `sync.RWMutex`; written atomically (temp file + `fsync` + rename +
+  directory `fsync`) on every change. Expired entries are pruned at load and by a background ticker (every
+  10 min), and ignored by `/check` even before pruning.
+- Readers (`/check`, the UI) never wait for disk I/O: mutations are serialized by a separate writer lock, the
+  file is written without holding the reader lock, and the new state is published only after the file is
+  committed. (Added after review round 1.)
+- A write that fails before the rename changes nothing (memory and file keep the old state). If only the
+  directory `fsync` after the rename fails, the change is in effect on disk and in memory; it is logged at error
+  level and the user is told it may not survive a crash. A revoke is therefore always effective immediately.
+  (Added after review round 1.)
+- Corrupt file at start → log an error and refuse to start (do not silently drop the allowlist). "Corrupt"
+  includes malformed records: the file must be a JSON array of complete entries (valid `ip`, non-empty `sub` and
+  `user`, non-zero `created_at` and `expires_at` with `expires_at` after `created_at`), with no unknown fields,
+  no trailing data and no two entries covering the same IP (IPv6: /64). The whole file is validated before
+  anything is pruned or rewritten, and a rejected file is left untouched. (Clarified after review round 1.)
 
 ### 3.5 Configuration (environment)
 
@@ -118,21 +131,22 @@ via hash or a tiny embedded CSS file).
 |---|---|---|
 | `LISTEN_ADDR` | `:8080` | Listen address |
 | `PUBLIC_URL` | (required) | `https://enable.gullane.no`; redirect URI is `PUBLIC_URL + /auth/callback` |
-| `OIDC_ISSUER` | (required) | `https://id.gullane.no` |
+| `OIDC_ISSUER` | (required) | `https://id.gullane.no`; no user info, query or fragment |
 | `OIDC_CLIENT_ID` | (required) | |
 | `OIDC_CLIENT_SECRET` | (required, or `OIDC_CLIENT_SECRET_FILE`) | |
 | `SESSION_SECRET` | (required, or `SESSION_SECRET_FILE`; at least 32 bytes) | HMAC key |
 | `ALLOWED_GROUPS` | empty (= any authenticated user) | Comma list of Pocket ID group names |
 | `ADMIN_GROUPS` | empty | Comma list; members see and revoke all entries |
 | `ALWAYS_ALLOW` | empty | Comma list of CIDRs always allowed by `/check` (LAN, tailnet) |
-| `CLIENT_IP_HEADER` | `X-Client-IP` | |
+| `CLIENT_IP_HEADER` | `X-Client-IP` | Must be a valid HTTP header name |
 | `DEFAULT_TTL` | `168h` | Pre-selected duration |
 | `MAX_TTL` | `720h` | Upper bound |
 | `SESSION_TTL` | `12h` | |
-| `DATA_DIR` | `/data` | |
+| `DATA_DIR` | `/data` | Absolute path to an existing, writable directory (checked at start) |
 | `LOG_LEVEL` | `info` | |
 
-Fail fast with a clear message on missing/invalid config. OIDC discovery runs at start with retries
+Fail fast with a clear message on missing/invalid config, including a missing or unwritable `DATA_DIR`
+(added after review round 1). OIDC discovery runs at start with retries
 (Pocket ID may start after ipgate); `/check` must work even if OIDC discovery has not succeeded yet.
 
 ### 3.6 Logging and metrics
@@ -140,6 +154,10 @@ Fail fast with a clear message on missing/invalid config. OIDC discovery runs at
 - Structured logs with `log/slog` (JSON) to stdout. Log every allow/revoke (user, IP, expiry) and every login
   (user, success/failure reason). Do **not** log every `/check` at info (debug only); never log tokens, cookies or
   secrets.
+- OIDC failures (discovery, token endpoint, JWKS, ID token verification) are logged as fixed categories only, for
+  example `token endpoint: unsuccessful response (HTTP 502)`. Upstream response bodies, raw library error
+  strings and the provider's `error_description` are never logged, because they can contain tokens; only
+  standard OAuth error codes are recorded. (Added after review round 1.)
 - Optional: `GET /metrics` is out of scope for v1.
 
 ## 4. Non-functional
