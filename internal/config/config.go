@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -110,8 +112,17 @@ func Load(getenv func(string) string) (*Config, error) {
 
 	if c.OIDCIssuer == "" {
 		fail("OIDC_ISSUER is required")
-	} else if u, err := url.Parse(c.OIDCIssuer); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		fail("OIDC_ISSUER: must be an absolute http(s) URL")
+	} else if err := checkIssuer(c.OIDCIssuer); err != nil {
+		fail("OIDC_ISSUER: %v", err)
+	}
+	if !validHeaderName(c.ClientIPHeader) {
+		fail("CLIENT_IP_HEADER: %q is not a valid HTTP header name", c.ClientIPHeader)
+	}
+	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
+		fail("LISTEN_ADDR: %v", err)
+	}
+	if !filepath.IsAbs(c.DataDir) {
+		fail("DATA_DIR: must be an absolute path")
 	}
 	if c.OIDCClientID == "" {
 		fail("OIDC_CLIENT_ID is required")
@@ -163,10 +174,54 @@ func parsePublicURL(raw string) (*url.URL, error) {
 	if u.Host == "" {
 		return nil, errors.New("missing host")
 	}
-	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+	if u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || u.Opaque != "" {
 		return nil, errors.New("must be scheme and host only, for example https://enable.gullane.no")
 	}
-	return &url.URL{Scheme: u.Scheme, Host: u.Host}, nil
+	// Canonical form, so the Origin header comparison is exact: lower-case host,
+	// no default port.
+	host := strings.ToLower(u.Host)
+	if (u.Scheme == "https" && strings.HasSuffix(host, ":443")) || (u.Scheme == "http" && strings.HasSuffix(host, ":80")) {
+		host = host[:strings.LastIndexByte(host, ':')]
+	}
+	return &url.URL{Scheme: u.Scheme, Host: host}, nil
+}
+
+// checkIssuer validates the issuer's shape. A path is allowed (some providers use
+// one); query, fragment and userinfo are not valid in an OIDC issuer.
+func checkIssuer(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	switch {
+	case u.Scheme != "https" && u.Scheme != "http":
+		return errors.New("must be an absolute https URL")
+	case u.Host == "" || u.Opaque != "":
+		return errors.New("missing host")
+	case u.User != nil:
+		return errors.New("must not contain user info")
+	case u.RawQuery != "" || u.ForceQuery:
+		return errors.New("must not contain a query")
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return errors.New("must not contain a fragment")
+	}
+	return nil
+}
+
+// validHeaderName reports whether s is an RFC 9110 field-name token.
+func validHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parsePrefix accepts a CIDR or a bare IP address (treated as a single-host prefix).

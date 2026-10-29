@@ -198,3 +198,31 @@ func TestDirectorySyncFailure(t *testing.T) {
 		t.Errorf("memory has %d entries, disk %d", a, b)
 	}
 }
+
+func TestOpenRequiresUsableDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Open(filepath.Join(dir, "missing", "allowlist.json"), nil); err == nil || !strings.Contains(err.Error(), "data directory") {
+		t.Errorf("missing directory: %v", err)
+	}
+	file := filepath.Join(dir, "file")
+	os.WriteFile(file, nil, 0o600)
+	if _, err := Open(filepath.Join(file, "allowlist.json"), nil); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("file as directory: %v", err)
+	}
+	ro := filepath.Join(dir, "ro")
+	os.Mkdir(ro, 0o500)
+	defer os.Chmod(ro, 0o700)
+	if f, err := os.CreateTemp(ro, "probe"); err == nil {
+		f.Close()
+		t.Skip("directory still writable (running as root?)")
+	}
+	if _, err := Open(filepath.Join(ro, "allowlist.json"), nil); err == nil || !strings.Contains(err.Error(), "not writable") {
+		t.Errorf("read-only directory: %v", err)
+	}
+	names, _ := os.ReadDir(dir)
+	for _, n := range names {
+		if strings.HasPrefix(n.Name(), ".write-test") {
+			t.Errorf("write probe left behind: %s", n.Name())
+		}
+	}
+}

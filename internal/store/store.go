@@ -88,12 +88,15 @@ type Store struct {
 
 // Open loads the allowlist from path. A missing file yields an empty store; a
 // corrupt or malformed file is an error and is left untouched. Expired entries are
-// dropped at load.
+// dropped at load. The directory must exist and be writable.
 func Open(path string, now func() time.Time) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
 	s := &Store{path: path, now: now, ops: osOps, entries: map[netip.Prefix]Entry{}}
+	if err := checkDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -121,6 +124,28 @@ func Open(path string, now func() time.Time) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+// checkDir verifies that dir exists, is a directory and is writable, so that a
+// misconfigured DATA_DIR fails at startup instead of on the first allow.
+func checkDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("data directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory %s is not a directory", dir)
+	}
+	f, err := os.CreateTemp(dir, ".write-test-*")
+	if err != nil {
+		return fmt.Errorf("data directory %s is not writable: %w", dir, err)
+	}
+	name := f.Name()
+	f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("data directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // decode parses and validates the whole file: a JSON array of complete entries,

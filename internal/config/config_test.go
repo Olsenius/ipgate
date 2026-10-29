@@ -90,19 +90,29 @@ func TestLoadSecretFiles(t *testing.T) {
 
 func TestLoadErrors(t *testing.T) {
 	cases := map[string]func(m map[string]string){
-		"PUBLIC_URL is required":        func(m map[string]string) { delete(m, "PUBLIC_URL") },
-		"PUBLIC_URL: must be scheme":    func(m map[string]string) { m["PUBLIC_URL"] = "https://x.no/sub" },
-		"PUBLIC_URL: must start":        func(m map[string]string) { m["PUBLIC_URL"] = "ftp://x.no" },
-		"OIDC_ISSUER is required":       func(m map[string]string) { delete(m, "OIDC_ISSUER") },
-		"OIDC_CLIENT_ID is required":    func(m map[string]string) { delete(m, "OIDC_CLIENT_ID") },
-		"OIDC_CLIENT_SECRET (or":        func(m map[string]string) { delete(m, "OIDC_CLIENT_SECRET") },
-		"at least 32 bytes":             func(m map[string]string) { m["SESSION_SECRET"] = "short" },
-		"both set":                      func(m map[string]string) { m["SESSION_SECRET_FILE"] = "/nonexistent" },
-		"ALWAYS_ALLOW":                  func(m map[string]string) { m["ALWAYS_ALLOW"] = "not-an-ip" },
-		"DEFAULT_TTL (":                 func(m map[string]string) { m["DEFAULT_TTL"] = "1000h" },
-		"MAX_TTL: invalid duration":     func(m map[string]string) { m["MAX_TTL"] = "forever" },
-		"SESSION_TTL: must be positive": func(m map[string]string) { m["SESSION_TTL"] = "-1h" },
-		"LOG_LEVEL: unknown level":      func(m map[string]string) { m["LOG_LEVEL"] = "chatty" },
+		"PUBLIC_URL is required":                                func(m map[string]string) { delete(m, "PUBLIC_URL") },
+		"PUBLIC_URL: must be scheme":                            func(m map[string]string) { m["PUBLIC_URL"] = "https://x.no/sub" },
+		"PUBLIC_URL: must start":                                func(m map[string]string) { m["PUBLIC_URL"] = "ftp://x.no" },
+		"OIDC_ISSUER is required":                               func(m map[string]string) { delete(m, "OIDC_ISSUER") },
+		"OIDC_CLIENT_ID is required":                            func(m map[string]string) { delete(m, "OIDC_CLIENT_ID") },
+		"OIDC_CLIENT_SECRET (or":                                func(m map[string]string) { delete(m, "OIDC_CLIENT_SECRET") },
+		"at least 32 bytes":                                     func(m map[string]string) { m["SESSION_SECRET"] = "short" },
+		"both set":                                              func(m map[string]string) { m["SESSION_SECRET_FILE"] = "/nonexistent" },
+		"ALWAYS_ALLOW":                                          func(m map[string]string) { m["ALWAYS_ALLOW"] = "not-an-ip" },
+		"DEFAULT_TTL (":                                         func(m map[string]string) { m["DEFAULT_TTL"] = "1000h" },
+		"MAX_TTL: invalid duration":                             func(m map[string]string) { m["MAX_TTL"] = "forever" },
+		"SESSION_TTL: must be positive":                         func(m map[string]string) { m["SESSION_TTL"] = "-1h" },
+		"CLIENT_IP_HEADER: \"Invalid Header\"":                  func(m map[string]string) { m["CLIENT_IP_HEADER"] = "Invalid Header" },
+		"CLIENT_IP_HEADER: \"X-IP:\"":                           func(m map[string]string) { m["CLIENT_IP_HEADER"] = "X-IP:" },
+		"OIDC_ISSUER: must not contain a fragment":              func(m map[string]string) { m["OIDC_ISSUER"] = "https://id.example/#fragment" },
+		"OIDC_ISSUER: must not contain a query":                 func(m map[string]string) { m["OIDC_ISSUER"] = "https://id.example/?tenant=x" },
+		"OIDC_ISSUER: must not contain user info":               func(m map[string]string) { m["OIDC_ISSUER"] = "https://user:pw@id.example" },
+		"OIDC_ISSUER: must be an absolute https":                func(m map[string]string) { m["OIDC_ISSUER"] = "id.example" },
+		"OIDC_ISSUER: missing host":                             func(m map[string]string) { m["OIDC_ISSUER"] = "https:///path" },
+		"PUBLIC_URL: must be scheme and host only, for example": func(m map[string]string) { m["PUBLIC_URL"] = "https://enable.example/#x" },
+		"LISTEN_ADDR":                                           func(m map[string]string) { m["LISTEN_ADDR"] = "8080" },
+		"DATA_DIR: must be an absolute path":                    func(m map[string]string) { m["DATA_DIR"] = "data" },
+		"LOG_LEVEL: unknown level":                              func(m map[string]string) { m["LOG_LEVEL"] = "chatty" },
 	}
 	for want, mutate := range cases {
 		t.Run(want, func(t *testing.T) {
@@ -113,5 +123,40 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("err = %v, want containing %q", err, want)
 			}
 		})
+	}
+}
+
+func TestPublicURLCanonical(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://Enable.Gullane.NO":      "https://enable.gullane.no",
+		"https://enable.gullane.no:443":  "https://enable.gullane.no",
+		"https://enable.gullane.no:8443": "https://enable.gullane.no:8443",
+		"http://localhost:80/":           "http://localhost",
+		"http://localhost:8080":          "http://localhost:8080",
+	} {
+		m := base()
+		m["PUBLIC_URL"] = in
+		c, err := Load(env(m))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if got := c.PublicOrigin(); got != want {
+			t.Errorf("PublicOrigin(%s) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestValidOptionalValues(t *testing.T) {
+	m := base()
+	m["OIDC_ISSUER"] = "https://id.example/realms/home/"
+	m["CLIENT_IP_HEADER"] = "X-Real_Client.IP"
+	m["LISTEN_ADDR"] = "127.0.0.1:9000"
+	m["DATA_DIR"] = "/var/lib/ipgate"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OIDCIssuer != "https://id.example/realms/home" {
+		t.Errorf("issuer = %q", c.OIDCIssuer)
 	}
 }
