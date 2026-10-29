@@ -253,16 +253,36 @@ func TestWriteFailureRollsBack(t *testing.T) {
 }
 
 func TestCorruptFile(t *testing.T) {
+	const ok = `"sub":"alice","user":"Alice","created_at":"2026-10-29T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"`
 	for name, content := range map[string]string{
-		"garbage":    "{not json",
-		"wrong type": `{"ip":"1.2.3.4"}`,
-		"bad ip":     `[{"ip":"nope","expires_at":"2030-01-01T00:00:00Z"}]`,
-		"missing ip": `[{"sub":"x","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"garbage":                "{not json",
+		"empty file":             "",
+		"null document":          "null",
+		"object not array":       `{"ip":"1.2.3.4"}`,
+		"bad ip":                 `[{"ip":"nope",` + ok + `}]`,
+		"missing ip":             `[{` + ok + `}]`,
+		"missing expires_at":     `[{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"2026-10-29T00:00:00Z"}]`,
+		"missing created_at":     `[{"ip":"203.0.113.5","sub":"alice","user":"Alice","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"missing sub":            `[{"ip":"203.0.113.5","user":"Alice","created_at":"2026-10-29T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"empty sub":              `[{"ip":"203.0.113.5","sub":"","user":"Alice","created_at":"2026-10-29T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"missing user":           `[{"ip":"203.0.113.5","sub":"alice","created_at":"2026-10-29T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"expiry before creation": `[{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"2030-01-02T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"expiry equals creation": `[{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"2030-01-01T00:00:00Z","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"bad timestamp":          `[{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"yesterday","expires_at":"2030-01-01T00:00:00Z"}]`,
+		"unknown field":          `[{"ip":"203.0.113.5",` + ok + `,"extra":1}]`,
+		"null record":            `[null]`,
+		"trailing data":          `[{"ip":"203.0.113.5",` + ok + `}] []`,
+		"duplicate ip":           `[{"ip":"203.0.113.5",` + ok + `},{"ip":"203.0.113.5",` + ok + `}]`,
+		"duplicate ipv6 /64":     `[{"ip":"2001:db8::1",` + ok + `},{"ip":"2001:db8::2",` + ok + `}]`,
+		"valid then missing exp": `[{"ip":"203.0.113.6",` + ok + `},{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"2026-10-29T00:00:00Z"}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "allowlist.json")
 			os.WriteFile(path, []byte(content), 0o600)
-			if _, err := Open(path, nil); err == nil {
+			// The clock is far in the future, so a lenient loader would prune the
+			// valid-looking records and rewrite the file.
+			c := &clock{t: time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)}
+			if _, err := Open(path, c.Now); err == nil {
 				t.Fatal("Open accepted corrupt file")
 			}
 			// The file must be left untouched.
@@ -271,6 +291,45 @@ func TestCorruptFile(t *testing.T) {
 				t.Error("corrupt file was modified")
 			}
 		})
+	}
+}
+
+func TestExpiredCompleteRecordsArePruned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	os.WriteFile(path, []byte(`[{"ip":"203.0.113.5","sub":"alice","user":"Alice","created_at":"2026-10-28T00:00:00Z","expires_at":"2026-10-29T00:00:00Z","user_agent":""}]`), 0o600)
+	s, err := Open(path, newClock().Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.List(nil)) != 0 {
+		t.Error("expired record kept")
+	}
+	b, _ := os.ReadFile(path)
+	if strings.TrimSpace(string(b)) != "[]" {
+		t.Errorf("file not rewritten after pruning: %s", b)
+	}
+}
+
+func TestPutValidates(t *testing.T) {
+	c := newClock()
+	s := open(t, filepath.Join(t.TempDir(), "allowlist.json"), c)
+	good := entry("203.0.113.5", "alice", c.Now(), time.Hour)
+	for name, mutate := range map[string]func(*Entry){
+		"no ip":       func(e *Entry) { e.IP = netip.Addr{} },
+		"no sub":      func(e *Entry) { e.Sub = "" },
+		"no user":     func(e *Entry) { e.User = "" },
+		"no created":  func(e *Entry) { e.CreatedAt = time.Time{} },
+		"no expiry":   func(e *Entry) { e.ExpiresAt = time.Time{} },
+		"exp<created": func(e *Entry) { e.ExpiresAt = e.CreatedAt.Add(-time.Second) },
+	} {
+		e := good
+		mutate(&e)
+		if err := s.Put(e); err == nil {
+			t.Errorf("%s: Put accepted invalid entry", name)
+		}
+	}
+	if len(s.List(nil)) != 0 {
+		t.Error("invalid entries stored")
 	}
 }
 
@@ -330,7 +389,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Go(func() {
 			ip := netip.AddrFrom4([4]byte{198, 51, 100, byte(i)})
 			for range 20 {
-				s.Put(Entry{IP: ip, Sub: "x", ExpiresAt: c.Now().Add(time.Hour)})
+				s.Put(Entry{IP: ip, Sub: "x", User: "x", CreatedAt: c.Now(), ExpiresAt: c.Now().Add(time.Hour)})
 				s.Lookup(ip)
 				s.List(nil)
 			}
@@ -345,7 +404,7 @@ func TestConcurrentAccess(t *testing.T) {
 func BenchmarkLookup(b *testing.B) {
 	s, _ := Open(filepath.Join(b.TempDir(), "allowlist.json"), nil)
 	for i := range 100 {
-		s.Put(Entry{IP: netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}), ExpiresAt: time.Now().Add(time.Hour)})
+		s.Put(Entry{IP: netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}), Sub: "x", User: "x", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
 	}
 	ip := netip.MustParseAddr("198.51.100.50")
 	b.ReportAllocs()

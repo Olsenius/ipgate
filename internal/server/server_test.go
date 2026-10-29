@@ -215,7 +215,8 @@ func (e *env) check(ip string, extra map[string]string) int {
 func (e *env) put(ip, sub string, ttl time.Duration) {
 	e.t.Helper()
 	now := time.Now()
-	if err := e.store.Put(store.Entry{IP: netip.MustParseAddr(ip), Sub: sub, User: sub, CreatedAt: now, ExpiresAt: now.Add(ttl)}); err != nil {
+	created := now.Add(min(ttl, 0) - time.Hour) // also allows already-expired entries
+	if err := e.store.Put(store.Entry{IP: netip.MustParseAddr(ip), Sub: sub, User: sub, CreatedAt: created, ExpiresAt: now.Add(ttl)}); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -850,7 +851,7 @@ func TestDurationChoices(t *testing.T) {
 
 func BenchmarkCheck(b *testing.B) {
 	st, _ := store.Open(filepath.Join(b.TempDir(), "allowlist.json"), nil)
-	st.Put(store.Entry{IP: netip.MustParseAddr("203.0.113.10"), ExpiresAt: time.Now().Add(time.Hour)})
+	st.Put(store.Entry{IP: netip.MustParseAddr("203.0.113.10"), Sub: "x", User: "x", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
 	pu, _ := url.Parse(publicURL)
 	cfg := &config.Config{PublicURL: pu, SessionSecret: make([]byte, 32), ClientIPHeader: "X-Client-IP", DefaultTTL: time.Hour, MaxTTL: time.Hour}
 	s, _ := New(cfg, st, auth.NewOIDC(auth.OIDCConfig{}), slog.New(slog.NewTextHandler(io.Discard, nil)), nil)

@@ -2,10 +2,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"os"
@@ -59,17 +61,14 @@ func Open(path string, now func() time.Time) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read allowlist: %w", err)
 	}
-	var list []Entry
-	if err := json.Unmarshal(b, &list); err != nil {
-		return nil, fmt.Errorf("allowlist %s is corrupt: %w", path, err)
+	list, err := decode(b)
+	if err != nil {
+		return nil, fmt.Errorf("allowlist %s is corrupt (fix or remove it; ipgate will not overwrite it): %w", path, err)
 	}
+	// Every record has been validated above, before anything is pruned or written.
 	t := now()
 	pruned := false
-	for i, e := range list {
-		if !e.IP.IsValid() {
-			return nil, fmt.Errorf("allowlist %s is corrupt: entry %d has no valid ip", path, i)
-		}
-		e.IP = e.IP.Unmap().WithZone("")
+	for _, e := range list {
 		if !e.ExpiresAt.After(t) {
 			pruned = true
 			continue
@@ -82,6 +81,58 @@ func Open(path string, now func() time.Time) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+// decode parses and validates the whole file: a JSON array of complete entries,
+// no unknown fields, no trailing data, at most one entry per match key.
+func decode(b []byte) ([]Entry, error) {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, errors.New("not a JSON array")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	var list []Entry
+	if err := dec.Decode(&list); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("trailing data after JSON array")
+	}
+	seen := make(map[netip.Prefix]int, len(list))
+	for i := range list {
+		e := &list[i]
+		e.IP = e.IP.Unmap().WithZone("")
+		if err := Validate(*e); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		k := Key(e.IP)
+		if j, dup := seen[k]; dup {
+			return nil, fmt.Errorf("entries %d and %d both cover %s", j, i, k)
+		}
+		seen[k] = i
+	}
+	return list, nil
+}
+
+// Validate checks that an entry is complete and consistent. The same rules apply
+// when loading and when adding, so ipgate never writes a file it would refuse to load.
+func Validate(e Entry) error {
+	switch {
+	case !e.IP.IsValid():
+		return errors.New("missing or invalid ip")
+	case e.Sub == "":
+		return errors.New("missing sub")
+	case e.User == "":
+		return errors.New("missing user")
+	case e.CreatedAt.IsZero():
+		return errors.New("missing created_at")
+	case e.ExpiresAt.IsZero():
+		return errors.New("missing expires_at")
+	case !e.ExpiresAt.After(e.CreatedAt):
+		return errors.New("expires_at is not after created_at")
+	}
+	return nil
 }
 
 // Lookup reports whether a is covered by an unexpired entry. It does no I/O.
@@ -98,10 +149,10 @@ func (s *Store) Lookup(a netip.Addr) (Entry, bool) {
 
 // Put adds or refreshes the entry for e.IP (taking ownership) and persists the change.
 func (s *Store) Put(e Entry) error {
-	if !e.IP.IsValid() {
-		return errors.New("invalid ip")
-	}
 	e.IP = e.IP.Unmap().WithZone("")
+	if err := Validate(e); err != nil {
+		return err
+	}
 	k := Key(e.IP)
 	s.mu.Lock()
 	defer s.mu.Unlock()
