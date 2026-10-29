@@ -117,8 +117,8 @@ via hash or a tiny embedded CSS file).
   committed. (Added after review round 1.)
 - A write that fails before the rename changes nothing (memory and file keep the old state). If only the
   directory `fsync` after the rename fails, the change is in effect on disk and in memory; it is logged at error
-  level and the user is told it may not survive a crash. A revoke is therefore always effective immediately.
-  (Added after review round 1.)
+  level and the user is told it may not survive a crash. A revoke therefore takes effect as soon as
+  its file is renamed into place, before the response is sent. (Added after review round 1.)
 - Corrupt file at start → log an error and refuse to start (do not silently drop the allowlist). "Corrupt"
   includes malformed records: the file must be a JSON array of complete entries (valid `ip`, non-empty `sub` and
   `user`, non-zero `created_at` and `expires_at` with `expires_at` after `created_at`), with no unknown fields,
