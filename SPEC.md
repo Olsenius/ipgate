@@ -56,32 +56,32 @@ ipgate is one small Go service that does two jobs:
 - Client IP comes **only** from the header named by `CLIENT_IP_HEADER` (default `X-Client-IP`). Ignore
   `X-Forwarded-For`, `RemoteAddr` and everything else. Missing or unparsable header → deny.
 - Allowed if the IP is in `ALWAYS_ALLOW` (CIDR list) or has an unexpired allowlist entry.
-- Allowed → `204 No Content`. Denied → `403` with a short plain-text body in Norwegian, for example:
-  `Ingen tilgang fra denne IP-adressen. Gå til https://enable.gullane.no for å logge inn.` (use `PUBLIC_URL`).
+- Allowed → `204 No Content`. Denied → `403` with a short plain-text body in English, for example:
+  `Access denied from this IP address. Go to https://enable.gullane.no to log in.` (use `PUBLIC_URL`).
 - Must be fast and allocation-light: in-memory lookup, no disk or network I/O per request.
 - Normalise IPs with `net/netip` (`Unmap()` IPv4-mapped IPv6). Exact-IP match for IPv4. For IPv6, match on the
   /64 prefix of the stored address (residential IPv6 privacy addresses rotate inside a /64).
 
 ### 3.2 Web UI (`enable.gullane.no`)
 
-All UI text in **Norwegian (bokmål)**, simple and mobile-friendly; one embedded HTML template set and a small
+All UI text in **English** (changed from Norwegian 2026-10-29), simple and mobile-friendly; one embedded HTML template set and a small
 inline stylesheet, no JavaScript frameworks, no external assets (CSP: `default-src 'self'`, inline style allowed
 via hash or a tiny embedded CSS file).
 
-- `GET /`: not logged in → page with the visitor's IP and a "Logg inn" button (→ `/login`). Logged in →
+- `GET /`: not logged in → page with the visitor's IP and a "Log in" button (→ `/login`). Logged in →
   - the visitor's current IP and whether it is already allowed (and until when),
-  - a form to allow this IP with a duration choice: 1 dag, 7 dager (default), 30 dager (only durations
+  - a form to allow this IP with a duration choice: 1 day, 7 days (default), 30 days (only durations
     `<= MAX_TTL` are shown),
-  - a hint: if you are on mobile data, choose 1 dag (mobile IPs are shared, CGNAT),
-  - a list of the user's own entries (IP, created, expires, user agent at creation) with "Fjern" buttons,
-  - for admins (member of a group in `ADMIN_GROUPS`): all entries from all users, with "Fjern",
-  - "Logg ut".
+  - a hint: if you are on mobile data, choose 1 day (mobile IPs are shared, CGNAT),
+  - a list of the user's own entries (IP, created, expires, user agent at creation) with "Remove" buttons,
+  - for admins (member of a group in `ADMIN_GROUPS`): all entries from all users, with "Remove",
+  - "Log out".
 - `GET /login`: start OIDC Authorization Code flow with **PKCE (S256)**, `state` and `nonce`. Store
   verifier/state/nonce in a short-lived (10 min), signed, `HttpOnly`, `Secure`, `SameSite=Lax` cookie.
   Scopes: `openid profile email groups`.
 - `GET /auth/callback`: verify state, exchange code, verify the ID token (issuer, audience, expiry, signature via
   JWKS, nonce). Read `sub`, `preferred_username`, `name`, `email`, `groups`.
-  - If `ALLOWED_GROUPS` is non-empty and the user is in none of them → 403 page ("Du har ikke tilgang").
+  - If `ALLOWED_GROUPS` is non-empty and the user is in none of them → 403 page ("You do not have access").
   - Otherwise set the session cookie and redirect to `/`.
 - `POST /allow`: logged in + valid CSRF token. Adds/refreshes the entry for the **request's client IP** (from
   `CLIENT_IP_HEADER`, same rules as `/check`), never an IP from the form. Duration from the form, validated
