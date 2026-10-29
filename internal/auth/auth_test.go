@@ -57,14 +57,27 @@ func TestSessionRoundTripTamperExpiry(t *testing.T) {
 	if _, err := s.DecodeSession(b64.EncodeToString([]byte(forged)) + "." + sig); err != ErrSignature {
 		t.Errorf("tampered payload err = %v", err)
 	}
-	// Tampering with the signature.
-	last := sig[len(sig)-1]
-	repl := byte('A')
-	if last == 'A' {
-		repl = 'B'
+	// Tampering with the signature: change a character that carries only data
+	// bits (the first), so the decoded MAC always differs.
+	flip := func(c byte) string {
+		if c == 'A' {
+			return "B"
+		}
+		return "A"
 	}
-	if _, err := s.DecodeSession(payload + "." + sig[:len(sig)-1] + string(repl)); err != ErrSignature {
+	if _, err := s.DecodeSession(payload + "." + flip(sig[0]) + sig[1:]); err != ErrSignature {
 		t.Errorf("tampered signature err = %v", err)
+	}
+	// A non-canonical encoding of the same MAC (padding bits set in the last
+	// character) is rejected rather than accepted as an equivalent token.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	idx := strings.IndexByte(alphabet, sig[len(sig)-1])
+	if idx%4 != 0 {
+		t.Fatalf("canonical signature has padding bits set: %q", sig)
+	}
+	variant := sig[:len(sig)-1] + string(alphabet[idx+1])
+	if _, err := s.DecodeSession(payload + "." + variant); err == nil {
+		t.Error("non-canonical signature encoding accepted")
 	}
 	for _, bad := range []string{"", "abc", ".", "abc.", ".abc", "!!!.!!!"} {
 		if _, err := s.DecodeSession(bad); err == nil {

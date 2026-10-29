@@ -17,7 +17,10 @@ var (
 	ErrExpired   = errors.New("token expired")
 )
 
-var b64 = base64.RawURLEncoding
+// Strict: reject non-zero padding bits, so each token has exactly one accepted
+// encoding (the last character of an unpadded value otherwise has variants that
+// decode to the same bytes).
+var b64 = base64.RawURLEncoding.Strict()
 
 // Signer creates and verifies HMAC-SHA256 signed, expiring tokens. Each purpose
 // ("session", "login", "csrf") uses its own derived key so a token minted for one
