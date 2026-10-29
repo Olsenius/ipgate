@@ -160,3 +160,35 @@ func TestValidOptionalValues(t *testing.T) {
 		t.Errorf("issuer = %q", c.OIDCIssuer)
 	}
 }
+
+func TestURLAuthorityValidation(t *testing.T) {
+	bad := []string{
+		"https://:443", "https://:8443", "https://", "https://:", "https://host:", "https://host:0",
+		"https://host:65536", "https://host:99999", "https://[]:443", "https://[]",
+	}
+	for _, key := range []string{"PUBLIC_URL", "OIDC_ISSUER"} {
+		for _, v := range bad {
+			m := base()
+			m[key] = v
+			if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), key) {
+				t.Errorf("%s=%q accepted (err %v)", key, v, err)
+			}
+		}
+		for _, v := range []string{"https://host:1", "https://host:65535", "https://[2001:db8::1]:8443", "https://[2001:db8::1]", "https://192.0.2.1:8443"} {
+			m := base()
+			m[key] = v
+			if _, err := Load(env(m)); err != nil {
+				t.Errorf("%s=%q rejected: %v", key, v, err)
+			}
+		}
+	}
+	m := base()
+	m["PUBLIC_URL"] = "https://[2001:DB8::1]:443"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.PublicOrigin(); got != "https://[2001:db8::1]" {
+		t.Errorf("IPv6 PUBLIC_URL canonicalised to %q", got)
+	}
+}

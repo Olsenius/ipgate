@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -171,8 +172,8 @@ func parsePublicURL(raw string) (*url.URL, error) {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return nil, errors.New("must start with https://")
 	}
-	if u.Host == "" {
-		return nil, errors.New("missing host")
+	if err := checkAuthority(u); err != nil {
+		return nil, err
 	}
 	if u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || u.Opaque != "" {
 		return nil, errors.New("must be scheme and host only, for example https://enable.gullane.no")
@@ -183,7 +184,30 @@ func parsePublicURL(raw string) (*url.URL, error) {
 	if (u.Scheme == "https" && strings.HasSuffix(host, ":443")) || (u.Scheme == "http" && strings.HasSuffix(host, ":80")) {
 		host = host[:strings.LastIndexByte(host, ':')]
 	}
-	return &url.URL{Scheme: u.Scheme, Host: host}, nil
+	c := &url.URL{Scheme: u.Scheme, Host: host}
+	if err := checkAuthority(c); err != nil { // re-check after canonicalisation
+		return nil, err
+	}
+	return c, nil
+}
+
+// checkAuthority requires a non-empty hostname and, if a port is given, a
+// numeric port in 1-65535. url.Parse accepts "https://:443" and ports such as
+// 99999, which would only fail later at login or discovery.
+func checkAuthority(u *url.URL) error {
+	if u.Opaque != "" || u.Hostname() == "" {
+		return errors.New("missing host")
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return errors.New("empty port")
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("invalid port %q (must be 1-65535)", p)
+		}
+	}
+	return nil
 }
 
 // checkIssuer validates the issuer's shape. A path is allowed (some providers use
@@ -196,8 +220,6 @@ func checkIssuer(raw string) error {
 	switch {
 	case u.Scheme != "https" && u.Scheme != "http":
 		return errors.New("must be an absolute https URL")
-	case u.Host == "" || u.Opaque != "":
-		return errors.New("missing host")
 	case u.User != nil:
 		return errors.New("must not contain user info")
 	case u.RawQuery != "" || u.ForceQuery:
@@ -205,7 +227,7 @@ func checkIssuer(raw string) error {
 	case u.Fragment != "" || strings.Contains(raw, "#"):
 		return errors.New("must not contain a fragment")
 	}
-	return nil
+	return checkAuthority(u)
 }
 
 // validHeaderName reports whether s is an RFC 9110 field-name token.
