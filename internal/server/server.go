@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -120,9 +121,35 @@ func New(cfg *config.Config, st *store.Store, oidc OIDCClient, log *slog.Logger,
 		signer:    auth.NewSigner(cfg.SessionSecret, now),
 		durations: durationChoices(cfg.DefaultTTL, cfg.MaxTTL),
 		denyBody:  fmt.Appendf(nil, "Access denied from this IP address. Go to %s to log in.\n", cfg.PublicURL),
-		csp:       "default-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+		csp:       buildCSP(cfg),
 	}
 	return s, nil
+}
+
+// buildCSP returns the UI's Content-Security-Policy. form-action also governs
+// the redirect after a form POST, so the return hosts must be listed or the
+// browser would block the redirect from POST /allow to the return URL.
+func buildCSP(cfg *config.Config) string {
+	formAction := "'self'"
+	for _, p := range cfg.ReturnHosts.Patterns() {
+		formAction += " https://" + p
+	}
+	return "default-src 'self'; style-src 'self'; img-src 'self'; form-action " + formAction + "; frame-ancestors 'none'; base-uri 'none'"
+}
+
+// home builds a redirect to the index with an optional flash code and return URL.
+func home(code, ret string) string {
+	v := url.Values{}
+	if code != "" {
+		v.Set("m", code)
+	}
+	if ret != "" {
+		v.Set("return", ret)
+	}
+	if len(v) == 0 {
+		return "/"
+	}
+	return "/?" + v.Encode()
 }
 
 // durationChoices returns 1, 7 and 30 days (those <= max), plus the default if it
@@ -311,7 +338,7 @@ func (s *Server) checkPost(w http.ResponseWriter, r *http.Request) (auth.Session
 	}
 	sess, ok := s.session(r)
 	if !ok {
-		http.Redirect(w, r, "/?m=expired", http.StatusSeeOther)
+		http.Redirect(w, r, home("expired", s.returnURL(r.PostForm.Get("return"))), http.StatusSeeOther)
 		return auth.Session{}, false
 	}
 	if !s.signer.CheckCSRF(sess, r.PostForm.Get("csrf")) {

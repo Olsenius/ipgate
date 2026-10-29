@@ -21,6 +21,9 @@ type LoginState struct {
 	State    string `json:"state"`
 	Nonce    string `json:"nonce"`
 	Verifier string `json:"verifier"`
+	// Return is the already-validated return URL ("https://<host>/") or "".
+	// It travels only inside this signed cookie, never via the callback URL.
+	Return string `json:"return,omitempty"`
 }
 
 const (

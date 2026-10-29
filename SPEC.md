@@ -99,6 +99,29 @@ via hash or a tiny embedded CSS file).
 - `POST /logout`: clear session, redirect to `/`.
 - `GET /healthz`: `200 ok` (no auth), for the Docker healthcheck.
 
+#### Return link (added 2026-10-29)
+
+Caddy sends unallowed browsers to `PUBLIC_URL/?return=https://<protected-host>/` (scheme, host and `/` only,
+built by Caddy). The feature is off when `RETURN_HOSTS` is empty.
+
+- `GET /` and `GET /login` accept an optional `return` query parameter. It is valid only if the raw value starts
+  with the literal `https://`; the authority has no userinfo, no `%`, `\`, brackets, whitespace or control
+  characters, and no port other than `443`; the host is a lower-cased ASCII DNS name (punycode allowed, raw
+  Unicode, IP addresses, all-numeric last labels and a trailing dot are not), matches `RETURN_HOSTS` and is not
+  the `PUBLIC_URL` host. Path, query and fragment are dropped: the value used is always `https://<host>/`.
+- Invalid values are ignored silently: no error, no redirect, no Continue link.
+- `/login` stores the validated value in the signed login cookie. After a successful callback, ipgate
+  redirects to `/?return=<value>`, taken only from that cookie (a `return` on the callback URL is ignored) and
+  re-validated against the current configuration.
+- The allow form carries the value as a hidden field, re-validated on `POST /allow`. After a successful allow,
+  redirect (303) to the return URL. Error redirects keep it, so the user can retry. On a durability warning,
+  redirect to the warning page with the return URL kept.
+- When logged in, the IP is already allowed (or in `ALWAYS_ALLOW`), and a valid return URL is present, `GET /`
+  shows a "Continue" button linking to it. The host name is never printed on the page (neutral UI); it appears
+  only in the link target.
+- The CSP `form-action` lists `'self'` plus `https://<pattern>` for each `RETURN_HOSTS` entry, because
+  browsers apply `form-action` to the redirect after a form POST.
+
 ### 3.3 Sessions and CSRF
 
 - Session = signed cookie (HMAC-SHA256 with `SESSION_SECRET`), containing `sub`, display name, admin flag,
@@ -148,6 +171,7 @@ via hash or a tiny embedded CSS file).
 | `ALLOWED_GROUPS` | empty (= any authenticated user) | Comma list of Pocket ID group names |
 | `ADMIN_GROUPS` | empty | Comma list; members see and revoke all entries |
 | `ALWAYS_ALLOW` | empty | Comma list of CIDRs always allowed by `/check` (LAN, tailnet) |
+| `RETURN_HOSTS` | empty (= return links off) | Comma list of exact hosts and `*.suffix` wildcards allowed as return targets, e.g. `*.gullane.no`. A wildcard matches any deeper name, never the suffix itself; the suffix needs at least two labels. The `PUBLIC_URL` host must not be listed. (Added 2026-10-29.) |
 | `CLIENT_IP_HEADER` | `X-Client-IP` | Must be a valid HTTP header name |
 | `DEFAULT_TTL` | `168h` | Pre-selected duration |
 | `MAX_TTL` | `720h` | Upper bound |

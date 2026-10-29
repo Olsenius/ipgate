@@ -32,6 +32,7 @@ with a message listing every problem.
 | `ALLOWED_GROUPS` | empty (= any authenticated user) | Comma list of Pocket ID group names allowed to log in |
 | `ADMIN_GROUPS` | empty | Comma list; members see and revoke all entries |
 | `ALWAYS_ALLOW` | empty | Comma list of CIDRs (or bare IPs) always allowed by `/check`, e.g. LAN and tailnet |
+| `RETURN_HOSTS` | empty (= off) | Hosts users may be sent back to after allowing their IP: exact names and `*.suffix` wildcards, e.g. `*.gullane.no`. See [Return links](#return-links) |
 | `CLIENT_IP_HEADER` | `X-Client-IP` | Header carrying the client IP (set by Caddy); must be a valid header name |
 | `DEFAULT_TTL` | `168h` | Pre-selected duration (must be `<= MAX_TTL`) |
 | `MAX_TTL` | `720h` | Upper bound; longer choices are hidden and rejected |
@@ -72,6 +73,39 @@ ID token.
 `header_up X-Client-IP {client_ip}` **overwrites** any `X-Client-IP` the client sent, which is what makes
 the header trustworthy. Hairpin traffic from the home LAN arrives as `10.116.0.1`; put the LAN in
 `ALWAYS_ALLOW` (e.g. `ALWAYS_ALLOW=10.116.0.0/24`).
+
+### Return links
+
+With `RETURN_HOSTS` set, Caddy can send a denied browser to
+`https://enable.gullane.no/?return=https://<protected-host>/`. After logging in and allowing the IP, the user
+is redirected straight back; if the IP is already allowed, the page shows a **Continue** button. A sketch
+of the Caddy side (homelab-admin owns the real config; check it against the Caddy `forward_auth` docs):
+
+```caddyfile
+		forward_auth ipgate:8080 {
+			uri /check
+			header_up X-Client-IP {client_ip}
+			@denied status 403
+			handle_response @denied {
+				redir https://enable.gullane.no/?return=https://{http.request.host}/ 302
+			}
+		}
+```
+
+Apps that cannot follow a login page then get a redirect instead of the plain 403 text, so consider limiting
+the redirect to browser requests.
+
+The `return` value is validated strictly and anything doubtful is ignored silently, so it can never become an
+open redirect:
+
+- the raw value must start with `https://`
+- no userinfo, `%`, `\`, brackets, whitespace or control characters in the host part, and no port other than 443
+- the host must be an ASCII DNS name (punycode is fine; IP addresses, a trailing dot and raw Unicode are not)
+- the host must match `RETURN_HOSTS` and must not be the `PUBLIC_URL` host
+- path, query and fragment are dropped, so the target is always `https://<host>/`
+
+The value travels through login only inside the signed login cookie, never via the callback URL. The host
+name is never shown on the page.
 
 ## Docker
 
@@ -183,6 +217,8 @@ development-only; it is not in the Docker image.
   and stay until the session expires (`SESSION_TTL`).
 - Every POST requires a per-session CSRF token, and POSTs with an `Origin` other than `PUBLIC_URL` are
   rejected.
+- Return links (`RETURN_HOSTS`) only ever redirect to `https://<allowed host>/`; the CSP `form-action` lists
+  exactly those hosts so the browser permits the redirect after `POST /allow`.
 - UI responses carry a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`,
   `Referrer-Policy: same-origin` and `X-Content-Type-Options: nosniff`. The referrer policy is deliberately
   not `no-referrer`: under that policy browsers send `Origin: null` on same-origin form POSTs, which the Origin

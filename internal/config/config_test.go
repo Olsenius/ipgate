@@ -192,3 +192,55 @@ func TestURLAuthorityValidation(t *testing.T) {
 		t.Errorf("IPv6 PUBLIC_URL canonicalised to %q", got)
 	}
 }
+
+func TestReturnHosts(t *testing.T) {
+	m := base()
+	m["RETURN_HOSTS"] = "jf.example.org, *.Gullane.NO ,"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.ReturnHosts.Patterns(), ","); got != "jf.example.org,*.gullane.no" {
+		t.Errorf("patterns = %q", got)
+	}
+	for host, want := range map[string]bool{
+		"jf.example.org":          true,
+		"a.gullane.no":            true,
+		"a.b.gullane.no":          true,
+		"xn--4ca.gullane.no":      true,
+		"gullane.no":              false, // wildcard never matches the suffix itself
+		"evilgullane.no":          false,
+		"a.gullane.no.evil.com":   false,
+		"a.gullane.nox":           false,
+		"example.org":             false,
+		"x.jf.example.org":        false, // exact entries are exact
+		"jf.example.org.evil.com": false,
+	} {
+		if got := c.ReturnHosts.Match(host); got != want {
+			t.Errorf("Match(%q) = %v, want %v", host, got, want)
+		}
+	}
+
+	m["RETURN_HOSTS"] = ""
+	c, _ = Load(env(m))
+	if !c.ReturnHosts.Empty() || c.ReturnHosts.Match("a.gullane.no") {
+		t.Error("empty RETURN_HOSTS should disable the feature")
+	}
+}
+
+func TestReturnHostsInvalid(t *testing.T) {
+	for _, v := range []string{
+		"*", "*.", "*.no", "*.*.gullane.no", "a.*.gullane.no", "https://a.gullane.no", "a.gullane.no/",
+		"a..gullane.no", "a.gullane.no.", ".gullane.no", "-a.gullane.no", "a-.gullane.no", "ä.gullane.no",
+		"203.0.113.5", "*.203.0.113", "[2001:db8::1]", "2001:db8::1", "a.gullane.123", "a.gullane.no:443",
+		"a_b.gullane.no", strings.Repeat("a", 64) + ".no",
+		"enable.gullane.no", // the PUBLIC_URL host
+	} {
+		m := base()
+		m["PUBLIC_URL"] = "https://enable.gullane.no"
+		m["RETURN_HOSTS"] = v
+		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RETURN_HOSTS") {
+			t.Errorf("RETURN_HOSTS=%q accepted (err %v)", v, err)
+		}
+	}
+}

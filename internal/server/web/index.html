@@ -18,12 +18,15 @@
     {{else}}
       <p class="status bad">Not allowed</p>
     {{end}}
+    {{if .Continue}}
+      <p><a class="button" href="{{.Return}}">Continue</a></p>
+    {{end}}
   {{end}}
 </section>
 
 {{if not .LoggedIn}}
 <p>Log in to give this IP address access. Every device on the same network (TV, phone, tablet) then gets access.</p>
-<p><a class="button" href="/login">Log in</a></p>
+<p><a class="button" href="{{.LoginURL}}">Log in</a></p>
 {{else}}
 
 {{if .CanAllow}}
@@ -31,6 +34,7 @@
   <h2>{{if .Allowed}}Extend access{{else}}Allow access{{end}}</h2>
   <form method="post" action="/allow">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
+    {{if .Return}}<input type="hidden" name="return" value="{{.Return}}">{{end}}
     <fieldset>
       <legend>For how long?</legend>
       {{range .Durations}}

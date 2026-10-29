@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ type Config struct {
 	AllowedGroups    []string
 	AdminGroups      []string
 	AlwaysAllow      []netip.Prefix
+	ReturnHosts      ReturnHosts // RETURN_HOSTS; empty = return links off
 	ClientIPHeader   string
 	DefaultTTL       time.Duration
 	MaxTTL           time.Duration
@@ -39,6 +41,9 @@ type Config struct {
 
 // RedirectURL is the OIDC redirect URI.
 func (c *Config) RedirectURL() string { return c.PublicURL.String() + "/auth/callback" }
+
+// PublicHost is PUBLIC_URL's lower-case host name, without port.
+func (c *Config) PublicHost() string { return c.PublicURL.Hostname() }
 
 // PublicOrigin is the origin (scheme://host) of PUBLIC_URL, used for the Origin check.
 func (c *Config) PublicOrigin() string { return c.PublicURL.Scheme + "://" + c.PublicURL.Host }
@@ -139,6 +144,15 @@ func Load(getenv func(string) string) (*Config, error) {
 			continue
 		}
 		c.AlwaysAllow = append(c.AlwaysAllow, p)
+	}
+
+	if rh, err := ParseReturnHosts(getenv("RETURN_HOSTS")); err != nil {
+		fail("RETURN_HOSTS: %v", err)
+	} else {
+		c.ReturnHosts = rh
+		if c.PublicURL != nil && slices.Contains(rh.exact, c.PublicHost()) {
+			fail("RETURN_HOSTS: must not list the PUBLIC_URL host %q", c.PublicHost())
+		}
 	}
 
 	if c.DefaultTTL > 0 && c.MaxTTL > 0 && c.DefaultTTL > c.MaxTTL {

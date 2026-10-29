@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"time"
 
@@ -40,6 +41,9 @@ type entryView struct {
 
 type indexPage struct {
 	Title    string
+	Return   string // validated "https://<host>/" or ""
+	LoginURL string
+	Continue bool // show the Continue link to Return
 	Flash    *flash
 	IP       string
 	LoggedIn bool
@@ -59,7 +63,10 @@ type indexPage struct {
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
-	p := indexPage{Title: "Access"}
+	p := indexPage{Title: "Access", LoginURL: "/login"}
+	if p.Return = s.returnURL(r.URL.Query().Get("return")); p.Return != "" {
+		p.LoginURL = "/login?" + url.Values{"return": {p.Return}}.Encode()
+	}
 	if f, ok := flashes[r.URL.Query().Get("m")]; ok {
 		p.Flash = &f
 	}
@@ -81,6 +88,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 			p.Allowed, p.AllowedUntil = true, s.formatTime(e.ExpiresAt)
 		}
 		p.CanAllow = !p.Private
+		p.Continue = p.Return != "" && (p.Allowed || p.AlwaysAllowed)
 	}
 	for _, c := range s.durations {
 		p.Durations = append(p.Durations, durationOption{Value: c.Value, Label: c.Label, Selected: c.d == s.cfg.DefaultTTL})
@@ -101,11 +109,13 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	ret := s.returnURL(r.URL.Query().Get("return"))
 	if _, ok := s.session(r); ok {
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, home("", ret), http.StatusFound)
 		return
 	}
 	ls := auth.NewLoginState()
+	ls.Return = ret
 	u, err := s.oidc.AuthCodeURL(ls)
 	if err != nil {
 		s.log.Warn("login unavailable", "err", err)
@@ -190,7 +200,9 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setCookie(w, sessionCookie, v, int(s.cfg.SessionTTL/time.Second))
 	s.log.Info("login succeeded", "user", user, "sub", claims.Sub, "admin", admin)
-	http.Redirect(w, r, "/", http.StatusFound)
+	// The return URL comes only from the signed login cookie, and is re-validated
+	// against the current configuration.
+	http.Redirect(w, r, home("", s.returnURL(ls.Return)), http.StatusFound)
 }
 
 func intersects(have, want []string) bool {
@@ -203,14 +215,15 @@ func intersects(have, want []string) bool {
 }
 
 func (s *Server) allow(w http.ResponseWriter, r *http.Request, sess auth.Session) {
+	ret := s.returnURL(r.PostForm.Get("return"))
 	ip, ok := s.clientIP(r)
 	if !ok {
-		http.Redirect(w, r, "/?m=noip", http.StatusSeeOther)
+		http.Redirect(w, r, home("noip", ret), http.StatusSeeOther)
 		return
 	}
 	if Refused(ip) {
 		s.log.Info("allow refused for private address", "user", sess.Name, "sub", sess.Sub, "ip", ip.String())
-		http.Redirect(w, r, "/?m=private", http.StatusSeeOther)
+		http.Redirect(w, r, home("private", ret), http.StatusSeeOther)
 		return
 	}
 	var ttl time.Duration
@@ -220,7 +233,7 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, sess auth.Session
 		}
 	}
 	if ttl <= 0 || ttl > s.cfg.MaxTTL {
-		http.Redirect(w, r, "/?m=duration", http.StatusSeeOther)
+		http.Redirect(w, r, home("duration", ret), http.StatusSeeOther)
 		return
 	}
 	now := s.now()
@@ -237,12 +250,16 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, sess auth.Session
 	case errors.Is(err, store.ErrNotDurable):
 		// The entry is in effect (on disk and in memory) but may not survive a crash.
 		s.log.Error("ip allowed but not confirmed durable", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339), "err", err)
-		http.Redirect(w, r, "/?m=unsynced", http.StatusSeeOther)
+		http.Redirect(w, r, home("unsynced", ret), http.StatusSeeOther) // warning first; Continue is shown
 	case err != nil:
 		s.log.Error("allow failed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "err", err)
-		http.Redirect(w, r, "/?m=error", http.StatusSeeOther)
+		http.Redirect(w, r, home("error", ret), http.StatusSeeOther)
 	default:
 		s.log.Info("ip allowed", "user", sess.Name, "sub", sess.Sub, "ip", ip.String(), "expires_at", e.ExpiresAt.UTC().Format(time.RFC3339))
+		if ret != "" {
+			http.Redirect(w, r, ret, http.StatusSeeOther)
+			return
+		}
 		http.Redirect(w, r, "/?m=allowed", http.StatusSeeOther)
 	}
 }
