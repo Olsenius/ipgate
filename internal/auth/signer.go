@@ -17,9 +17,10 @@ var (
 	ErrExpired   = errors.New("token expired")
 )
 
-// Strict: reject non-zero padding bits, so each token has exactly one accepted
-// encoding (the last character of an unpadded value otherwise has variants that
-// decode to the same bytes).
+// Strict rejects non-zero padding bits (the last character of an unpadded value
+// otherwise has variants that decode to the same bytes). Strict decoding still
+// skips '\r' and '\n', so Verify rejects tokens containing them; together this
+// gives each token exactly one accepted encoding.
 var b64 = base64.RawURLEncoding.Strict()
 
 // Signer creates and verifies HMAC-SHA256 signed, expiring tokens. Each purpose
@@ -71,6 +72,9 @@ func (s *Signer) Sign(purpose string, v any, exp time.Time) (string, error) {
 
 // Verify checks the signature (constant time) and expiry, then decodes into v.
 func (s *Signer) Verify(purpose, token string, v any) error {
+	if strings.ContainsAny(token, "\r\n") {
+		return ErrMalformed
+	}
 	p, sig, ok := strings.Cut(token, ".")
 	if !ok || p == "" || sig == "" {
 		return ErrMalformed

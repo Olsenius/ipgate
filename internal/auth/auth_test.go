@@ -79,6 +79,18 @@ func TestSessionRoundTripTamperExpiry(t *testing.T) {
 	if _, err := s.DecodeSession(payload + "." + variant); err == nil {
 		t.Error("non-canonical signature encoding accepted")
 	}
+	// The base64 decoder skips CR and LF; Verify must not, or the same token
+	// would have more encodings than the canonical one.
+	for _, alias := range []string{
+		payload + "." + sig[:5] + "\r\n" + sig[5:],
+		payload + "." + sig[:5] + "\n" + sig[5:],
+		payload[:5] + "\r" + payload[5:] + "." + sig,
+		payload + "." + sig + "\n",
+	} {
+		if _, err := s.DecodeSession(alias); err != ErrMalformed {
+			t.Errorf("token with CR/LF: err = %v, want ErrMalformed", err)
+		}
+	}
 	for _, bad := range []string{"", "abc", ".", "abc.", ".abc", "!!!.!!!"} {
 		if _, err := s.DecodeSession(bad); err == nil {
 			t.Errorf("DecodeSession(%q) succeeded", bad)
