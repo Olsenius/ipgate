@@ -107,7 +107,8 @@ built by Caddy). The feature is off when `RETURN_HOSTS` is empty.
 - `GET /` and `GET /login` accept an optional `return` query parameter. It is valid only if the raw value starts
   with the literal `https://`; the authority has no userinfo, no `%`, `\`, brackets, whitespace or control
   characters, and no port other than `443`; the host is a lower-cased ASCII DNS name (punycode allowed, raw
-  Unicode, IP addresses, all-numeric last labels and a trailing dot are not), matches `RETURN_HOSTS` and is not
+  Unicode, IP addresses, numeric last labels (decimal, or `0x` hex such as `0x7f000001`, which browsers
+  treat as IPv4) and a trailing dot are not), matches `RETURN_HOSTS` and is not
   the `PUBLIC_URL` host. Path, query and fragment are dropped: the value used is always `https://<host>/`.
 - Invalid values are ignored silently: no error, no redirect, no Continue link.
 - `/login` stores the validated value in the signed login cookie. After a successful callback, ipgate

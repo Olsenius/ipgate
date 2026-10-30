@@ -63,9 +63,11 @@ func ParseReturnHosts(raw string) (ReturnHosts, error) {
 
 // ValidHostname accepts a lower-case ASCII DNS name: labels of 1-63 characters
 // [a-z0-9-], not starting or ending with '-', at most 253 characters, no
-// trailing dot, and not an IP address (including all-numeric last labels, which
-// browsers would treat as IPv4). Punycode (xn--) labels are ordinary ASCII
-// labels and are accepted; raw Unicode is not.
+// trailing dot, and not an IP address. Browsers parse a host as IPv4 whenever
+// its last label is numeric in the WHATWG URL sense (decimal, octal or "0x" hex,
+// e.g. "127.1" or "0x7f000001"), so such last labels are rejected too.
+// Punycode (xn--) labels are ordinary ASCII labels and are accepted; raw Unicode
+// is not.
 func ValidHostname(h string) error {
 	if h == "" {
 		return errors.New("empty host name")
@@ -94,8 +96,18 @@ func ValidHostname(h string) error {
 			}
 		}
 	}
-	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
-		return errors.New("numeric top-level label (looks like an IP address)")
+	if numericLabel(labels[len(labels)-1]) {
+		return errors.New("numeric last label (browsers treat the host as an IPv4 address)")
 	}
 	return nil
+}
+
+// numericLabel reports whether a lower-case label "ends in a number" per the
+// WHATWG URL host parser: all decimal digits (this covers octal with a leading
+// 0), or "0x" followed by zero or more hex digits.
+func numericLabel(l string) bool {
+	if hex, ok := strings.CutPrefix(l, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return strings.Trim(l, "0123456789") == ""
 }

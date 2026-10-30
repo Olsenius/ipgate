@@ -100,7 +100,7 @@ open redirect:
 
 - the raw value must start with `https://`
 - no userinfo, `%`, `\`, brackets, whitespace or control characters in the host part, and no port other than 443
-- the host must be an ASCII DNS name (punycode is fine; IP addresses, a trailing dot and raw Unicode are not)
+- the host must be an ASCII DNS name (punycode is fine; IP addresses, numeric last labels such as `127.1` or `0x7f000001`, a trailing dot and raw Unicode are not)
 - the host must match `RETURN_HOSTS` and must not be the `PUBLIC_URL` host
 - path, query and fragment are dropped, so the target is always `https://<host>/`
 

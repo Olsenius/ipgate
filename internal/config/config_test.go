@@ -234,6 +234,9 @@ func TestReturnHostsInvalid(t *testing.T) {
 		"a..gullane.no", "a.gullane.no.", ".gullane.no", "-a.gullane.no", "a-.gullane.no", "ä.gullane.no",
 		"203.0.113.5", "*.203.0.113", "[2001:db8::1]", "2001:db8::1", "a.gullane.123", "a.gullane.no:443",
 		"a_b.gullane.no", strings.Repeat("a", 64) + ".no",
+		// WHATWG numeric last labels: browsers resolve these to IPv4 addresses.
+		"0x7f000001", "0x7f.0x0.0x0.0x1", "0x0", "0x", "0xff", "a.gullane.0x1", "*.gullane.0xab",
+		"127.1", "017700000001", "0177.0.0.1",
 		"enable.gullane.no", // the PUBLIC_URL host
 	} {
 		m := base()
@@ -241,6 +244,34 @@ func TestReturnHostsInvalid(t *testing.T) {
 		m["RETURN_HOSTS"] = v
 		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RETURN_HOSTS") {
 			t.Errorf("RETURN_HOSTS=%q accepted (err %v)", v, err)
+		}
+	}
+}
+
+// TestValidHostnameNumericLastLabel pins the WHATWG rule: a host whose last
+// label is numeric (decimal, octal or 0x hex) is parsed by browsers as IPv4, so
+// it is not a DNS name. Numeric labels elsewhere, and labels that only look hex,
+// are fine.
+func TestValidHostnameNumericLastLabel(t *testing.T) {
+	for _, h := range []string{
+		"0x7f000001", "0x7f.0x0.0x0.0x1", "0x", "0x0", "0xffffffff", "127.1", "1", "017700000001",
+		"0177.0.0.1", "a.gullane.0x1", "a.gullane.0xab", "a.gullane.123",
+	} {
+		if ValidHostname(h) == nil {
+			t.Errorf("ValidHostname(%q) accepted", h)
+		}
+	}
+	for _, h := range []string{
+		"0x7f.gullane.no", "123.gullane.no", "a.0xg", "a.x0", "a.0xa-b", "xn--bcher-kva.example", "a.b0",
+	} {
+		if err := ValidHostname(h); err != nil {
+			t.Errorf("ValidHostname(%q) = %v, want accepted", h, err)
+		}
+	}
+	// Configured exact hosts and wildcard suffixes use the same rule.
+	for _, v := range []string{"0x7f000001", "0x7f.0x0.0x0.0x1", "*.gullane.0x1"} {
+		if _, err := ParseReturnHosts(v); err == nil {
+			t.Errorf("ParseReturnHosts(%q) accepted", v)
 		}
 	}
 }
