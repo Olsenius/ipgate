@@ -233,8 +233,9 @@ development-only; it is not in the Docker image.
 - Writes are atomic (temp file, fsync, rename, directory fsync) and never block `/check`: readers use the
   last committed state while a write is in progress. If only the final directory fsync fails, the change is
   in effect but may not survive a crash; this is logged at error level and the user sees a warning. A revoke
-  takes effect once its file write is committed (before the response is sent), including in that case; if
-  the write fails before the rename, access is unchanged and the user sees an error.
+  takes effect once the write attempt has completed and the new state is published in memory (before the
+  response is sent), including in that case; the renamed file alone does not mean it is active yet. If the
+  write fails before the rename, access is unchanged and the user sees an error.
 - No application-level rate limits: allowlist writes only happen on authenticated user actions and the
   10-minute pruner. Put rate limits for `/login` and `/auth/callback` in Caddy if needed.
 

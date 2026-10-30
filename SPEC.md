@@ -151,8 +151,11 @@ built by Caddy). The feature is off when `RETURN_HOSTS` is empty.
   committed. (Added after review round 1.)
 - A write that fails before the rename changes nothing (memory and file keep the old state). If only the
   directory `fsync` after the rename fails, the change is in effect on disk and in memory; it is logged at error
-  level and the user is told it may not survive a crash. A revoke therefore takes effect as soon as
-  its file is renamed into place, before the response is sent. (Added after review round 1.)
+  level and the user is told it may not survive a crash. A revoke therefore takes effect once the file-write
+  attempt has completed and the new state is published in memory, before the response is sent; this also
+  holds when the final directory `fsync` returns an error, in which case the revoke may still be lost in a
+  crash. Seeing the renamed file on disk does not by itself mean the revoke is active yet. (Added after review
+  round 1; timing clarified after review round 3.)
 - Corrupt file at start → log an error and refuse to start (do not silently drop the allowlist). "Corrupt"
   includes malformed records: the file must be a JSON array of complete entries (valid `ip`, non-empty `sub` and
   `user`, non-zero `created_at` and `expires_at` with `expires_at` after `created_at`), with no unknown fields,
